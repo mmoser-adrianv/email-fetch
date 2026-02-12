@@ -1,6 +1,8 @@
+import os
+
 from flask import (
     Flask, redirect, render_template, request,
-    session, url_for, jsonify, send_file,
+    session, url_for, jsonify, send_file, Response,
 )
 from flask_session import Session
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -117,6 +119,58 @@ def download_messages():
         )
     except Exception as e:
         return jsonify({"error": f"Download failed: {str(e)}"}), 500
+
+
+@app.route("/api/messages/download/progress")
+def download_progress():
+    """SSE endpoint that streams progress while building the ZIP."""
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    result_info = session.get("last_results")
+    if not result_info:
+        return jsonify({"error": "No messages to download. Fetch emails first."}), 400
+    token = auth_helper.get_token_from_cache()
+    if not token:
+        return jsonify({"error": "login_required"}), 401
+
+    return Response(
+        graph_helper.download_emails_zip_progress(
+            token["access_token"], result_info
+        ),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.route("/api/messages/download/file")
+def download_file():
+    """Serve a completed temp ZIP file and clean it up."""
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    path = request.args.get("path", "")
+    # Security: only allow files from the temp directory with our prefix
+    if not os.path.basename(path).startswith("emails_") or \
+       not path.endswith(".zip"):
+        return jsonify({"error": "Invalid file"}), 400
+    if not os.path.isfile(path):
+        return jsonify({"error": "File not found"}), 404
+
+    try:
+        return send_file(
+            path,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="emails.zip",
+        )
+    finally:
+        # Clean up temp file after sending
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

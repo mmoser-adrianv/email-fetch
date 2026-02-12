@@ -106,43 +106,53 @@
         html += '<button id="download-zip-btn" class="btn btn-download">Download All as ZIP</button>';
         emailResults.innerHTML = html;
 
-        // Attach download handler
+        // Attach download handler with SSE progress
         document.getElementById("download-zip-btn").addEventListener("click", function () {
             var dlBtn = this;
             dlBtn.disabled = true;
             dlBtn.innerHTML = '<span class="spinner"></span>Preparing your download…';
 
-            fetch("/api/messages/download")
-                .then(function (res) {
-                    if (res.status === 401) {
-                        window.location.href = "/login";
-                        return null;
-                    }
-                    if (!res.ok) {
-                        return res.json().then(function (err) {
-                            throw new Error(err.error || "Download failed");
-                        });
-                    }
-                    return res.blob();
-                })
-                .then(function (blob) {
-                    if (!blob) return;
-                    var url = URL.createObjectURL(blob);
+            var evtSource = new EventSource("/api/messages/download/progress");
+
+            evtSource.onmessage = function (event) {
+                var data = JSON.parse(event.data);
+
+                if (data.error) {
+                    evtSource.close();
+                    dlBtn.disabled = false;
+                    dlBtn.textContent = "Download All as ZIP";
+                    alert("Download failed: " + data.error);
+                    return;
+                }
+
+                if (data.done) {
+                    evtSource.close();
+                    dlBtn.innerHTML = '<span class="spinner"></span>Downloading…';
+
+                    // Fetch the completed ZIP file
                     var a = document.createElement("a");
-                    a.href = url;
+                    a.href = "/api/messages/download/file?path=" + encodeURIComponent(data.file);
                     a.download = "emails.zip";
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
+
                     dlBtn.disabled = false;
                     dlBtn.textContent = "Download All as ZIP";
-                })
-                .catch(function (err) {
-                    dlBtn.disabled = false;
-                    dlBtn.textContent = "Download All as ZIP";
-                    alert("Download failed: " + err.message);
-                });
+                    return;
+                }
+
+                // Progress update
+                dlBtn.innerHTML = '<span class="spinner"></span>'
+                    + 'Preparing email ' + data.current + ' of ' + data.total + '…';
+            };
+
+            evtSource.onerror = function () {
+                evtSource.close();
+                dlBtn.disabled = false;
+                dlBtn.textContent = "Download All as ZIP";
+                alert("Connection lost while preparing download.");
+            };
         });
     }
 

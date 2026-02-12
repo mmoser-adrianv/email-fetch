@@ -1,4 +1,6 @@
+import json
 import re
+import tempfile
 import zipfile
 from io import BytesIO
 from email.mime.multipart import MIMEMultipart
@@ -39,12 +41,13 @@ def search_people(access_token, query):
 
 
 def get_user_messages(access_token, user_email, top=10):
-    """Fetch messages from a user's mailbox.
+    """Fetch messages from the signed-in user's mailbox where the searched
+    person appears as a recipient or CC.
 
-    Tries /users/{email}/messages first. If the email belongs to a
-    Microsoft 365 Group (ErrorGroupIsUsedInNonGroupURI), it falls back
-    to finding the group by email and fetching its conversations via
-    /groups/{id}/conversations.
+    Uses /me/messages with a $filter on toRecipients and ccRecipients.
+    If the email belongs to a Microsoft 365 Group
+    (ErrorGroupIsUsedInNonGroupURI), it falls back to fetching group
+    conversations.
 
     Returns a dict with:
       - "messages": list of message dicts
@@ -54,18 +57,24 @@ def get_user_messages(access_token, user_email, top=10):
     """
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    # --- Attempt 1: regular user mailbox ---
+    # --- Search the signed-in user's mailbox for emails to/cc the person ---
+    # Note: toRecipients/ccRecipients are NOT filterable in Graph API.
+    # Use $search with "to:" and "cc:" instead (KQL syntax).
+    search_query = f'"to:{user_email} OR cc:{user_email}"'
     url = (
-        f"{GRAPH_URL}/users/{user_email}/messages"
-        f"?$select=id,subject,from,receivedDateTime,bodyPreview"
+        f"{GRAPH_URL}/me/messages"
+        f"?$search={search_query}"
+        f"&$select=id,subject,from,receivedDateTime,bodyPreview"
         f"&$top={top}"
-        f"&$orderby=receivedDateTime desc"
     )
     response = requests.get(url, headers=headers, timeout=30)
 
     if response.status_code == 200:
+        messages = _parse_messages(response.json())
+        # $search returns results by relevance; re-sort by date
+        messages.sort(key=lambda m: m.get("received", ""), reverse=True)
         return {
-            "messages": _parse_messages(response.json()),
+            "messages": messages,
             "source": "user",
             "email": user_email,
         }
@@ -161,11 +170,11 @@ def _sanitize_filename(name, max_len=80):
 def get_message_mime(access_token, email, message_id):
     """Download the raw MIME (.eml) content of a single message.
 
-    GET /users/{email}/messages/{id}/$value
+    GET /me/messages/{id}/$value
     Returns bytes (the full RFC‑822 message including attachments).
     """
     headers = {"Authorization": f"Bearer {access_token}"}
-    url = f"{GRAPH_URL}/users/{email}/messages/{message_id}/$value"
+    url = f"{GRAPH_URL}/me/messages/{message_id}/$value"
     resp = requests.get(url, headers=headers, timeout=60)
     if resp.status_code != 200:
         return None
@@ -343,3 +352,66 @@ def download_emails_zip(access_token, result_info):
 
     zip_buffer.seek(0)
     return zip_buffer
+
+
+def download_emails_zip_progress(access_token, result_info):
+    """Generator that yields SSE events while building the ZIP.
+
+    Each yield is a Server-Sent Event string:
+      - progress events:  data: {"current": 3, "total": 10, "subject": "..."}
+      - done event:       data: {"done": true, "file": "<temp_path>"}
+      - error event:      data: {"error": "..."}
+
+    The final ZIP is written to a temp file whose path is sent in the
+    done event so the client can fetch it via a separate download route.
+    """
+    messages = result_info.get("messages", [])
+    source = result_info.get("source", "user")
+    email = result_info.get("email", "")
+    group_id = result_info.get("groupId", "")
+    total = len(messages)
+
+    try:
+        tmp = tempfile.NamedTemporaryFile(
+            delete=False, suffix=".zip", prefix="emails_"
+        )
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for idx, msg in enumerate(messages, start=1):
+                subject = msg.get("subject", "email")
+
+                # Send progress event
+                evt = json.dumps({
+                    "current": idx,
+                    "total": total,
+                    "subject": subject,
+                })
+                yield f"data: {evt}\n\n"
+
+                safe_subject = _sanitize_filename(subject)
+                filename = f"{idx:02d}_{safe_subject}.eml"
+
+                if source == "user":
+                    mime_bytes = get_message_mime(
+                        access_token, email, msg["id"]
+                    )
+                else:
+                    mime_bytes = get_group_thread_mime(
+                        access_token, group_id, msg["id"]
+                    )
+
+                if mime_bytes:
+                    zf.writestr(filename, mime_bytes)
+                else:
+                    zf.writestr(
+                        filename.replace(".eml", "_ERROR.txt"),
+                        f"Failed to download: {subject}\n",
+                    )
+
+        tmp.close()
+
+        done_evt = json.dumps({"done": True, "file": tmp.name})
+        yield f"data: {done_evt}\n\n"
+
+    except Exception as e:
+        err_evt = json.dumps({"error": str(e)})
+        yield f"data: {err_evt}\n\n"
