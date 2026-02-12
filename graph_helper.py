@@ -5,7 +5,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
-from email.utils import formatdate
+from email.utils import formatdate, make_msgid, parsedate_to_datetime
 import base64
 
 import requests
@@ -172,34 +172,12 @@ def get_message_mime(access_token, email, message_id):
     return resp.content
 
 
-def get_group_thread_mime(access_token, group_id, thread_id):
-    """Build an EML file from the first post in a group thread.
+def _build_post_eml(headers, group_id, thread_id, post, subject,
+                     group_email):
+    """Build a MIME message (EML) from a single group post.
 
-    The /posts/{id}/$value endpoint is not reliably supported for group
-    posts, so instead we:
-      1. GET the first post with full body and sender info
-      2. GET any attachments on that post
-      3. Construct a proper MIME email (EML) from those parts
-
-    Returns bytes or None on failure.
+    Returns a MIMEMultipart object.
     """
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    # 1. Get the first post with body content
-    posts_url = (
-        f"{GRAPH_URL}/groups/{group_id}/threads/{thread_id}/posts"
-        f"?$select=id,body,from,receivedDateTime,hasAttachments"
-        f"&$top=1"
-    )
-    resp = requests.get(posts_url, headers=headers, timeout=60)
-    if resp.status_code != 200:
-        return None
-
-    posts = resp.json().get("value", [])
-    if not posts:
-        return None
-
-    post = posts[0]
     post_id = post["id"]
     body = post.get("body", {})
     body_content = body.get("content", "")
@@ -209,21 +187,30 @@ def get_group_thread_mime(access_token, group_id, thread_id):
     sender_name = sender.get("name", "")
     received = post.get("receivedDateTime", "")
 
-    # 2. Get the thread topic for the Subject header
-    thread_url = (
-        f"{GRAPH_URL}/groups/{group_id}/threads/{thread_id}"
-        f"?$select=topic"
-    )
-    tresp = requests.get(thread_url, headers=headers, timeout=10)
-    subject = ""
-    if tresp.status_code == 200:
-        subject = tresp.json().get("topic", "(no subject)")
-
-    # 3. Build the MIME message
+    # Build the MIME message with all standard headers
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
-    msg["From"] = f"{sender_name} <{sender_email}>" if sender_name else sender_email
-    msg["Date"] = received or formatdate(localtime=True)
+    msg["From"] = (
+        f"{sender_name} <{sender_email}>" if sender_name else sender_email
+    )
+    msg["To"] = group_email
+    msg["Message-ID"] = make_msgid(
+        idstring=post_id[:16], domain="graph.microsoft.com"
+    )
+
+    # Format the Date header properly from ISO 8601
+    if received:
+        try:
+            dt = parsedate_to_datetime(
+                received.replace("T", " ").replace("Z", " +0000")
+            )
+            msg["Date"] = formatdate(dt.timestamp(), localtime=False)
+        except (ValueError, TypeError):
+            msg["Date"] = formatdate(localtime=True)
+    else:
+        msg["Date"] = formatdate(localtime=True)
+
+    msg["MIME-Version"] = "1.0"
 
     # Body part
     if body_type == "html":
@@ -232,7 +219,7 @@ def get_group_thread_mime(access_token, group_id, thread_id):
         body_part = MIMEText(body_content, "plain", "utf-8")
     msg.attach(body_part)
 
-    # 4. Fetch and attach any attachments
+    # Fetch and attach any attachments
     if post.get("hasAttachments"):
         att_url = (
             f"{GRAPH_URL}/groups/{group_id}/threads/{thread_id}"
@@ -242,7 +229,9 @@ def get_group_thread_mime(access_token, group_id, thread_id):
         if att_resp.status_code == 200:
             for att in att_resp.json().get("value", []):
                 att_name = att.get("name", "attachment")
-                att_content_type = att.get("contentType", "application/octet-stream")
+                att_content_type = att.get(
+                    "contentType", "application/octet-stream"
+                )
                 att_bytes_b64 = att.get("contentBytes", "")
 
                 if att_bytes_b64:
@@ -257,6 +246,60 @@ def get_group_thread_mime(access_token, group_id, thread_id):
                     )
                     msg.attach(part)
 
+    return msg
+
+
+def get_group_thread_mime(access_token, group_id, thread_id):
+    """Build an EML file from the first post in a group thread.
+
+    The /posts/{id}/$value endpoint is not reliably supported for group
+    posts, so instead we:
+      1. GET the first post with full body and sender info
+      2. GET thread metadata for subject and group email
+      3. GET any attachments on the post
+      4. Construct a proper MIME email with full headers (To, Message-ID,
+         MIME-Version, Date, etc.)
+
+    Returns bytes or None on failure.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    # 1. Get the first post in the thread
+    posts_url = (
+        f"{GRAPH_URL}/groups/{group_id}/threads/{thread_id}/posts"
+        f"?$select=id,body,from,receivedDateTime,hasAttachments"
+        f"&$top=1"
+    )
+    resp = requests.get(posts_url, headers=headers, timeout=60)
+    if resp.status_code != 200:
+        return None
+
+    posts = resp.json().get("value", [])
+    if not posts:
+        return None
+
+    # 2. Get thread metadata (topic + group email for To header)
+    thread_url = (
+        f"{GRAPH_URL}/groups/{group_id}/threads/{thread_id}"
+        f"?$select=topic"
+    )
+    tresp = requests.get(thread_url, headers=headers, timeout=10)
+    subject = "(no subject)"
+    if tresp.status_code == 200:
+        subject = tresp.json().get("topic", "(no subject)")
+
+    # Get group email for the To header
+    group_url = f"{GRAPH_URL}/groups/{group_id}?$select=mail"
+    gresp = requests.get(group_url, headers=headers, timeout=10)
+    group_email = ""
+    if gresp.status_code == 200:
+        group_email = gresp.json().get("mail", "")
+
+    # 3. Build and return the EML
+    msg = _build_post_eml(
+        headers, group_id, thread_id, posts[0],
+        subject, group_email,
+    )
     return msg.as_bytes()
 
 
@@ -293,7 +336,6 @@ def download_emails_zip(access_token, result_info):
             if mime_bytes:
                 zf.writestr(filename, mime_bytes)
             else:
-                # Write a placeholder so the user knows it failed
                 zf.writestr(
                     filename.replace(".eml", "_ERROR.txt"),
                     f"Failed to download: {msg.get('subject', 'Unknown')}\n",

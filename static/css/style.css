@@ -205,9 +205,14 @@ td:last-child {
 
 /* Download button */
 .btn-download {
-    margin-top: 16px;
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
     background: #107c10;
     color: #fff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .btn-download:hover {
@@ -217,4 +222,21 @@ td:last-child {
 .btn-download:disabled {
     background: #999;
     cursor: not-allowed;
+}
+
+/* Spinner for download button */
+.btn-download .spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
 }

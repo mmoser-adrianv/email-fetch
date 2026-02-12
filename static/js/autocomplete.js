@@ -110,7 +110,7 @@
         document.getElementById("download-zip-btn").addEventListener("click", function () {
             var dlBtn = this;
             dlBtn.disabled = true;
-            dlBtn.textContent = "Preparing download...";
+            dlBtn.innerHTML = '<span class="spinner"></span>Preparing your download…';
 
             fetch("/api/messages/download")
                 .then(function (res) {
