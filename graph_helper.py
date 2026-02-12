@@ -22,7 +22,7 @@ def search_people(access_token, query):
         f"{GRAPH_URL}/me/people/"
         f"?$search={query}"
         f"&$select=displayName,scoredEmailAddresses"
-        f"&$top=10"
+        f"&$top=20"
     )
     response = requests.get(url, headers=headers, timeout=10)
     if response.status_code != 200:
@@ -40,7 +40,7 @@ def search_people(access_token, query):
     return results
 
 
-def get_user_messages(access_token, user_email, top=10):
+def get_user_messages(access_token, user_email, top=20):
     """Fetch messages from the signed-in user's mailbox where the searched
     person appears as a recipient or CC.
 
@@ -91,7 +91,7 @@ def get_user_messages(access_token, user_email, top=10):
     return {"error": error_body}
 
 
-def _get_group_threads(headers, group_email, top=10):
+def _get_group_threads(headers, group_email, top=20):
     """Look up a Microsoft 365 Group by its mail address and fetch its
     conversation threads."""
 
@@ -358,7 +358,7 @@ def download_emails_zip_progress(access_token, result_info):
     """Generator that yields SSE events while building the ZIP.
 
     Each yield is a Server-Sent Event string:
-      - progress events:  data: {"current": 3, "total": 10, "subject": "..."}
+      - progress events:  data: {"current": 3, "total": 20, "subject": "..."}
       - done event:       data: {"done": true, "file": "<temp_path>"}
       - error event:      data: {"error": "..."}
 
