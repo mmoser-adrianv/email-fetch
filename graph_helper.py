@@ -61,7 +61,7 @@ def get_user_messages(access_token, user_email, top=10):
         f"&$top={top}"
         f"&$orderby=receivedDateTime desc"
     )
-    response = requests.get(url, headers=headers, timeout=15)
+    response = requests.get(url, headers=headers, timeout=30)
 
     if response.status_code == 200:
         return {
@@ -110,7 +110,7 @@ def _get_group_threads(headers, group_email, top=10):
         f"&$top={top}"
         f"&$orderby=lastDeliveredDateTime desc"
     )
-    resp = requests.get(threads_url, headers=headers, timeout=15)
+    resp = requests.get(threads_url, headers=headers, timeout=30)
     if resp.status_code != 200:
         return {"error": resp.json()}
 
@@ -166,7 +166,7 @@ def get_message_mime(access_token, email, message_id):
     """
     headers = {"Authorization": f"Bearer {access_token}"}
     url = f"{GRAPH_URL}/users/{email}/messages/{message_id}/$value"
-    resp = requests.get(url, headers=headers, timeout=30)
+    resp = requests.get(url, headers=headers, timeout=60)
     if resp.status_code != 200:
         return None
     return resp.content
@@ -191,7 +191,7 @@ def get_group_thread_mime(access_token, group_id, thread_id):
         f"?$select=id,body,from,receivedDateTime,hasAttachments"
         f"&$top=1"
     )
-    resp = requests.get(posts_url, headers=headers, timeout=15)
+    resp = requests.get(posts_url, headers=headers, timeout=60)
     if resp.status_code != 200:
         return None
 
@@ -238,7 +238,7 @@ def get_group_thread_mime(access_token, group_id, thread_id):
             f"{GRAPH_URL}/groups/{group_id}/threads/{thread_id}"
             f"/posts/{post_id}/attachments"
         )
-        att_resp = requests.get(att_url, headers=headers, timeout=15)
+        att_resp = requests.get(att_url, headers=headers, timeout=60)
         if att_resp.status_code == 200:
             for att in att_resp.json().get("value", []):
                 att_name = att.get("name", "attachment")
