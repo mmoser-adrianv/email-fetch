@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+flask_session/
+.venv/
+*.egg-info/
+dist/
+build/
+.idea/*
+.claude/*

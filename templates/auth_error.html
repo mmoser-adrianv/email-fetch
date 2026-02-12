@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Authentication Error - Email Fetch{% endblock %}
+{% block content %}
+<div class="error-card">
+    <h1>Authentication Error</h1>
+    {% if result %}
+    <p><strong>Error:</strong> {{ result.get("error", "Unknown error") }}</p>
+    <p><strong>Description:</strong> {{ result.get("error_description", "No description available.") }}</p>
+    {% else %}
+    <p>An unknown authentication error occurred.</p>
+    {% endif %}
+    <a href="{{ url_for('login') }}" class="btn btn-primary">Try Again</a>
+</div>
+{% endblock %}

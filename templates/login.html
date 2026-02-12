@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Sign In - Email Fetch{% endblock %}
+{% block content %}
+<div class="login-card">
+    <h1>Email Fetch</h1>
+    <p>Sign in with your Microsoft account to search for people and view emails.</p>
+    <a href="{{ auth_uri }}" class="btn btn-primary">Sign in with Microsoft</a>
+</div>
+{% endblock %}

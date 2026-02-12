@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Email Fetch{% endblock %}
+{% block content %}
+<h1>Search for a Person</h1>
+<div class="search-container">
+    <div class="search-wrapper">
+        <input type="text" id="people-search" placeholder="Type a name or email..." autocomplete="off">
+        <div id="suggestions-dropdown" class="dropdown"></div>
+    </div>
+    <button id="fetch-emails-btn" class="btn btn-primary" disabled>Fetch Emails</button>
+</div>
+
+<div id="email-results"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/autocomplete.js') }}"></script>
+{% endblock %}
