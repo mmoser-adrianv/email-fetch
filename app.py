@@ -2,7 +2,7 @@ import os
 
 from flask import (
     Flask, redirect, render_template, request,
-    session, url_for, jsonify, send_file, Response,
+    session, url_for, jsonify, send_file, Response, stream_with_context,
 )
 from flask_session import Session
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -520,14 +520,13 @@ def api_chat():
                 session.modified = True
 
             # Persist assistant message and update session response_id
-            with app.app_context():
-                if assistant_text and chat_session_id:
-                    db.session.add(ChatMessage(session_id=chat_session_id, role="assistant", content=assistant_text))
-                    db_sess = ChatSession.query.get(chat_session_id)
-                    if db_sess:
-                        db_sess.openai_response_id = response_id
-                        db_sess.updated_at = db.func.now()
-                    db.session.commit()
+            if assistant_text and chat_session_id:
+                db.session.add(ChatMessage(session_id=chat_session_id, role="assistant", content=assistant_text))
+                db_sess = ChatSession.query.get(chat_session_id)
+                if db_sess:
+                    db_sess.openai_response_id = response_id
+                    db_sess.updated_at = db.func.now()
+                db.session.commit()
 
             yield f"data: {json.dumps({'done': True, 'session_id': chat_session_id})}\n\n"
 
@@ -535,7 +534,7 @@ def api_chat():
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return Response(
-        generate(),
+        stream_with_context(generate()),
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
