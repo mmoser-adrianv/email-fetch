@@ -9,3 +9,5 @@ Flask-SQLAlchemy>=3.1
 Flask-Migrate>=4.0
 pypdf>=4.0
 python-docx>=1.1
+chromadb>=0.6
+openai>=1.0

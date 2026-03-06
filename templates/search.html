@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Semantic Search{% endblock %}
+{% block styles %}
+<style>
+.search-form {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+}
+.search-form input[type="text"] {
+    flex: 1;
+}
+#search-error {
+    color: #c0392b;
+    margin-bottom: 12px;
+    display: none;
+}
+.result-card {
+    border: 1px solid #dde1e7;
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+    background: #fff;
+}
+.result-subject {
+    font-size: 1.05em;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+.result-meta {
+    font-size: 0.85em;
+    color: #555;
+    margin-bottom: 8px;
+}
+.result-snippet {
+    font-size: 0.88em;
+    color: #444;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-left: 3px solid #0078d4;
+    padding-left: 10px;
+    margin-top: 8px;
+}
+.result-score {
+    font-size: 0.78em;
+    color: #888;
+    float: right;
+}
+#no-results {
+    color: #666;
+    display: none;
+}
+#loading-spinner {
+    display: none;
+    font-size: 0.9em;
+    color: #555;
+    margin-bottom: 12px;
+}
+</style>
+{% endblock %}
+{% block content %}
+<h1>Semantic Search</h1>
+<form class="search-form" id="search-form" autocomplete="off">
+    <input type="text" id="query-input" placeholder="Search emails by topic, keyword, or question..." required>
+    <button type="submit" class="btn btn-primary" id="search-btn">Search</button>
+</form>
+<div id="search-error"></div>
+<div id="loading-spinner">Searching...</div>
+<div id="no-results">No results found.</div>
+<div id="results-container"></div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/search.js') }}"></script>
+{% endblock %}

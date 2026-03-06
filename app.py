@@ -233,12 +233,44 @@ def ingest_run():
 
     saved, skipped = save_email_to_db(detail, attachments)
 
+    if saved:
+        try:
+            import chroma_helper
+            from models import Email
+            email_row = Email.query.filter_by(message_id=message_id).first()
+            if email_row:
+                chroma_helper.embed_and_upsert(email_row)
+        except Exception as e:
+            app.logger.warning(f"ChromaDB embed failed: {e}")
+
     return jsonify({
         "saved": saved,
         "skipped": skipped,
         "subject": detail.get("subject", "(no subject)"),
         "attachmentCount": len(attachments),
     })
+
+
+@app.route("/search")
+def search():
+    if not session.get("user"):
+        return redirect(url_for("login"))
+    return render_template("search.html", user=session["user"])
+
+
+@app.route("/api/search")
+def api_search():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"results": []})
+    try:
+        import chroma_helper
+        results = chroma_helper.search_emails(query, n_results=10)
+        return jsonify({"results": results})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/auth/token-refresh", methods=["POST"])
