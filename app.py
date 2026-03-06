@@ -10,11 +10,16 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import app_config
 import auth_helper
 import graph_helper
+from flask_migrate import Migrate
+from models import db, save_email_to_db
 
 app = Flask(__name__)
 app.config.from_object(app_config)
 Session(app)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
+db.init_app(app)
+Migrate(app, db)
 
 
 @app.route("/")
@@ -171,6 +176,80 @@ def download_file():
             os.unlink(path)
         except OSError:
             pass
+
+
+@app.route("/archive")
+def archive():
+    if not session.get("user"):
+        return redirect(url_for("login"))
+    return render_template("archive.html", user=session["user"])
+
+
+@app.route("/api/archive/page")
+def archive_page():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    email = request.args.get("email", "")
+    if not email:
+        return jsonify({"error": "email parameter required"}), 400
+    next_link = request.args.get("nextLink", "") or None
+    token = auth_helper.get_token_from_cache()
+    if not token:
+        return jsonify({"error": "login_required"}), 401
+
+    messages, next_link_out = graph_helper.get_messages_page(
+        token["access_token"], email, next_link=next_link
+    )
+
+    if messages is None:
+        if next_link_out == "group_not_supported":
+            return jsonify({"error": "Group mailboxes are not supported on the archive page."}), 400
+        return jsonify({"error": "Failed to fetch messages from Microsoft Graph."}), 502
+
+    return jsonify({"messages": messages, "nextLink": next_link_out})
+
+
+@app.route("/api/archive/ingest", methods=["POST"])
+def archive_ingest():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    data = request.get_json(silent=True) or {}
+    message_id = data.get("messageId", "")
+    if not message_id:
+        return jsonify({"error": "messageId required"}), 400
+    token = auth_helper.get_token_from_cache()
+    if not token:
+        return jsonify({"error": "login_required"}), 401
+
+    access_token = token["access_token"]
+
+    detail = graph_helper.get_message_detail(access_token, message_id)
+    if not detail:
+        return jsonify({"error": "Failed to fetch message detail"}), 502
+
+    attachments = []
+    if detail.get("hasAttachments"):
+        attachments = graph_helper.get_message_attachments(access_token, message_id)
+
+    saved, skipped = save_email_to_db(detail, attachments)
+
+    return jsonify({
+        "saved": saved,
+        "skipped": skipped,
+        "subject": detail.get("subject", "(no subject)"),
+        "attachmentCount": len(attachments),
+    })
+
+
+@app.route("/api/auth/token-refresh", methods=["POST"])
+def token_refresh():
+    """Called periodically by the frontend to silently refresh the access token."""
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    token = auth_helper.get_token_from_cache()
+    if not token:
+        return jsonify({"error": "login_required"}), 401
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":

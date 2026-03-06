@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Email Archive{% endblock %}
+{% block styles %}
+<style>
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Indeterminate progress bar */
+#progress-bar {
+    height: 6px;
+    background: #e0e0e0;
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 8px 0 12px;
+}
+.progress-bar-inner {
+    height: 100%;
+    width: 40%;
+    background: linear-gradient(90deg, #0078d4, #50a8f5);
+    border-radius: 3px;
+    animation: progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes progress-slide {
+    0%   { margin-left: -40%; }
+    100% { margin-left: 100%; }
+}
+
+/* Search spinner inside the input */
+#search-spinner {
+    display: none;
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 14px;
+    height: 14px;
+    border: 2px solid #ccc;
+    border-top-color: #555;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    pointer-events: none;
+}
+.search-wrapper { position: relative; }
+
+/* Accent border on the counter box while running */
+#progress-panel.is-running .progress-summary {
+    border-left: 3px solid #0078d4;
+    padding-left: 13px;
+}
+
+/* Stop button pulse while running */
+#stop-btn {
+    animation: stop-pulse 2s ease-in-out infinite;
+}
+@keyframes stop-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.7; }
+}
+
+/* Status message row */
+#status-msg {
+    display: flex;
+    align-items: center;
+    font-weight: 500;
+    font-size: 0.95em;
+    color: #333;
+}
+</style>
+{% endblock %}
+{% block content %}
+<h1>Archive Emails to Database</h1>
+<div class="search-container">
+    <div class="search-wrapper">
+        <input type="text" id="people-search" placeholder="Type a name or email..." autocomplete="off">
+        <span id="search-spinner"></span>
+        <div id="suggestions-dropdown" class="dropdown"></div>
+    </div>
+    <button id="go-btn" class="btn btn-primary" disabled>Go</button>
+    <button id="stop-btn" class="btn btn-stop" style="display:none;">Stop</button>
+</div>
+
+<div id="progress-panel" style="display:none;">
+    <div class="progress-summary">
+        Processed: <strong id="count-processed">0</strong> &nbsp;&nbsp;
+        Saved: <strong id="count-saved">0</strong> &nbsp;&nbsp;
+        Skipped (duplicate): <strong id="count-skipped">0</strong>
+    </div>
+    <div id="progress-bar" style="display:none;"><div class="progress-bar-inner"></div></div>
+    <div id="status-msg" class="status-msg">
+        <span id="status-text"></span>
+    </div>
+</div>
+
+<div id="archive-log-wrap" style="display:none;">
+    <table id="archive-log">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Subject</th>
+                <th>Attachments</th>
+                <th>Result</th>
+            </tr>
+        </thead>
+        <tbody id="archive-log-body"></tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/archive.js') }}"></script>
+{% endblock %}

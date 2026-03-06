@@ -312,6 +312,109 @@ def get_group_thread_mime(access_token, group_id, thread_id):
     return msg.as_bytes()
 
 
+def get_messages_page(access_token, user_email, next_link=None, top=50):
+    """Fetch one page of message summaries for archiving.
+
+    Returns (messages_list, next_link_or_None).
+    messages_list contains dicts with keys: id, subject, hasAttachments.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    if next_link:
+        url = next_link
+    else:
+        search_query = f'"to:{user_email} OR cc:{user_email}"'
+        url = (
+            f"{GRAPH_URL}/me/messages"
+            f"?$search={search_query}"
+            f"&$select=id,subject,hasAttachments"
+            f"&$top={top}"
+        )
+
+    response = requests.get(url, headers=headers, timeout=30)
+    if response.status_code != 200:
+        error_body = response.json()
+        error_code = error_body.get("error", {}).get("code", "")
+        if error_code == "ErrorGroupIsUsedInNonGroupURI":
+            return None, "group_not_supported"
+        return None, None
+
+    data = response.json()
+    messages = [
+        {
+            "id": m.get("id", ""),
+            "subject": m.get("subject", "(no subject)"),
+            "hasAttachments": m.get("hasAttachments", False),
+        }
+        for m in data.get("value", [])
+    ]
+    next_link_out = data.get("@odata.nextLink")
+    return messages, next_link_out
+
+
+def get_message_detail(access_token, message_id):
+    """Fetch full details of a single message (body, recipients, etc.)."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    select = (
+        "id,internetMessageId,subject,from,toRecipients,ccRecipients,"
+        "receivedDateTime,body,hasAttachments"
+    )
+    url = f"{GRAPH_URL}/me/messages/{message_id}?$select={select}"
+    response = requests.get(url, headers=headers, timeout=30)
+    if response.status_code != 200:
+        return None
+    return response.json()
+
+
+def get_message_attachments(access_token, message_id):
+    """Fetch attachment metadata and content for a single message.
+
+    Paginates one attachment at a time ($top=1) to keep each JSON response
+    small, since Graph API may ignore $select and include contentBytes.
+    Downloads binary content via the /$value endpoint to avoid JSON parsing
+    problems entirely — binary responses have no parse limit.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    attachments = []
+
+    url = (
+        f"{GRAPH_URL}/me/messages/{message_id}/attachments"
+        "?$select=id,name,contentType,size,isInline&$top=1"
+    )
+
+    while url:
+        response = requests.get(url, headers=headers, timeout=60)
+        if response.status_code != 200:
+            break
+        try:
+            data = response.json()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Attachment list JSON parse failed for message %s (status=%s, body_start=%r)",
+                message_id, response.status_code, response.text[:200],
+            )
+            break
+
+        for att in data.get("value", []):
+            att_id = att.get("id")
+            if att_id:
+                # Fetch binary content via /$value — returns raw bytes, not
+                # base64 JSON, so there is no JSON size/truncation concern.
+                value_resp = requests.get(
+                    f"{GRAPH_URL}/me/messages/{message_id}/attachments/{att_id}/$value",
+                    headers=headers,
+                    timeout=60,
+                )
+                if value_resp.status_code == 200:
+                    att["contentBytes"] = base64.b64encode(value_resp.content).decode()
+            attachments.append(att)
+
+        url = data.get("@odata.nextLink")
+
+    return attachments
+
+
 def download_emails_zip(access_token, result_info):
     """Build an in-memory ZIP of .eml files for the given messages.
 

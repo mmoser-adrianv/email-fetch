@@ -5,12 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Email Fetch{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% block styles %}{% endblock %}
 </head>
 <body>
     <nav class="navbar">
         <div class="nav-brand">Email Fetch</div>
         {% if user %}
         <div class="nav-right">
+            <a href="{{ url_for('index') }}" class="nav-link">Email Fetch</a>
+            <a href="{{ url_for('archive') }}" class="nav-link">Archive</a>
             <span class="nav-user">{{ user.get("name", "User") }}</span>
             <a href="{{ url_for('logout') }}" class="nav-link">Logout</a>
         </div>

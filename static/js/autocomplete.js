@@ -110,7 +110,7 @@
         document.getElementById("download-zip-btn").addEventListener("click", function () {
             var dlBtn = this;
             dlBtn.disabled = true;
-            dlBtn.innerHTML = '<span class="spinner"></span>Preparing your download…';
+            dlBtn.innerHTML = '<span class="spinner"></span>Preparing your downloadâ€¦';
 
             var evtSource = new EventSource("/api/messages/download/progress");
 
@@ -127,7 +127,7 @@
 
                 if (data.done) {
                     evtSource.close();
-                    dlBtn.innerHTML = '<span class="spinner"></span>Downloading…';
+                    dlBtn.innerHTML = '<span class="spinner"></span>Downloadingâ€¦';
 
                     // Fetch the completed ZIP file
                     var a = document.createElement("a");
@@ -144,7 +144,7 @@
 
                 // Progress update
                 dlBtn.innerHTML = '<span class="spinner"></span>'
-                    + 'Preparing email ' + data.current + ' of ' + data.total + '…';
+                    + 'Preparing email ' + data.current + ' of ' + data.total + 'â€¦';
             };
 
             evtSource.onerror = function () {

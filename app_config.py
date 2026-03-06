@@ -14,3 +14,6 @@ GRAPH_ENDPOINT = "https://graph.microsoft.com/v1.0"
 
 SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
 SESSION_TYPE = "filesystem"
+
+SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL")
+SQLALCHEMY_TRACK_MODIFICATIONS = False
