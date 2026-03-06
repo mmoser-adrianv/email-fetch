@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+
+{% block title %}Email Chat{% endblock %}
+
+{% block styles %}
+<style>
+    /* Lock page scroll — only the chat window scrolls */
+    html, body { height: 100%; overflow: hidden; }
+
+    .container {
+        height: calc(100vh - 46px); /* 46px = navbar */
+        margin: 0 auto;
+        padding: 16px 16px 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    h1 { flex-shrink: 0; margin-bottom: 16px; }
+
+    .chat-layout {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        padding-bottom: 16px;
+    }
+
+    #chat-window {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 16px;
+        background: #fff;
+        border: 1px solid #dde1e7;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .msg-user,
+    .msg-assistant {
+        max-width: 75%;
+        padding: 10px 14px;
+        border-radius: 16px;
+        font-size: 14px;
+        line-height: 1.5;
+        word-break: break-word;
+    }
+
+    .msg-user {
+        white-space: pre-wrap;
+        background: #0078d4;
+        color: #fff;
+        align-self: flex-end;
+        border-bottom-right-radius: 4px;
+    }
+
+    .msg-assistant {
+        background: #f0f4f8;
+        color: #222;
+        align-self: flex-start;
+        border-bottom-left-radius: 4px;
+    }
+
+    .msg-assistant p { margin: 0 0 8px; }
+    .msg-assistant p:last-child { margin-bottom: 0; }
+    .msg-assistant ol, .msg-assistant ul { margin: 0 0 8px; padding-left: 20px; }
+    .msg-assistant li { margin-bottom: 4px; }
+    .msg-assistant strong { font-weight: 600; }
+
+    /* Typing indicator — three bouncing dots */
+    #thinking-indicator {
+        align-self: flex-start;
+        display: none;
+        padding: 10px 16px;
+        background: #f0f4f8;
+        border-radius: 16px;
+        border-bottom-left-radius: 4px;
+    }
+
+    #thinking-indicator span {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        margin: 0 2px;
+        background: #888;
+        border-radius: 50%;
+        animation: bounce 1.2s infinite ease-in-out;
+    }
+
+    #thinking-indicator span:nth-child(1) { animation-delay: 0s; }
+    #thinking-indicator span:nth-child(2) { animation-delay: 0.2s; }
+    #thinking-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes bounce {
+        0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+        30%            { transform: translateY(-6px); opacity: 1; }
+    }
+
+    .chat-input-bar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+    }
+
+    #chat-input {
+        flex: 1;
+        padding: 10px 14px;
+        font-size: 14px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        height: 42px;
+    }
+
+    #chat-input:focus {
+        outline: none;
+        border-color: #0078d4;
+        box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.2);
+    }
+
+    #chat-error {
+        color: #c0392b;
+        font-size: 13px;
+        margin-bottom: 8px;
+        display: none;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Email Chat</h1>
+<div class="chat-layout">
+    <div id="chat-window">
+        <div id="thinking-indicator"><span></span><span></span><span></span></div>
+    </div>
+    <div id="chat-error"></div>
+    <div class="chat-input-bar">
+        <input type="text" id="chat-input" placeholder="Ask about your emails..." autocomplete="off">
+        <button id="send-btn" class="btn btn-primary" disabled>Send</button>
+        <button id="new-chat-btn" class="btn" style="background:#f3f3f3;color:#444;">New Chat</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+{% endblock %}

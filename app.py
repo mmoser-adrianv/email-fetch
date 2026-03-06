@@ -273,6 +273,237 @@ def api_search():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/chat")
+def chat():
+    if not session.get("user"):
+        return redirect(url_for("login"))
+    return render_template("chat.html", user=session["user"])
+
+
+def _parse_query_for_dates(message):
+    """
+    Use GPT to extract a cleaned semantic query and optional date range from the user's message.
+    Returns: {"semantic_query": str, "date_start": str|None, "date_end": str|None}
+    Falls back to the original message with no dates on any failure.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    system_prompt = (
+        "You are a query parser for an email search system. "
+        f"Today's date (UTC) is {today_str}. "
+        "Given a user's natural language question about emails, extract:\n"
+        "1. 'semantic_query': the question with ALL time-based words removed (e.g. 'last week', "
+        "'yesterday', 'recently', 'this month', 'last week only'). Keep names, topics, and non-temporal context.\n"
+        "2. 'date_start': start of date range as ISO 8601 string (YYYY-MM-DDTHH:MM:SS+00:00), or null.\n"
+        "3. 'date_end': end of date range as ISO 8601 string (YYYY-MM-DDTHH:MM:SS+00:00), or null.\n\n"
+        "Date rules:\n"
+        "- 'last week' = Monday-to-Sunday week before the current week\n"
+        "- 'this week' = Monday of current week to today\n"
+        "- 'yesterday' = previous calendar day, full day\n"
+        "- 'today' = current calendar day\n"
+        "- 'last month' = full previous calendar month\n"
+        "- 'last N days' = today minus N days to today\n"
+        "- 'recently' = last 7 days\n"
+        "If no temporal qualifier, return null for both dates.\n"
+        'Respond ONLY with JSON: {"semantic_query": "...", "date_start": "...", "date_end": "..."}'
+    )
+    fallback = {"semantic_query": message, "date_start": None, "date_end": None}
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=app_config.OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message},
+            ],
+            temperature=0,
+            max_tokens=200,
+        )
+        parsed = json.loads(response.choices[0].message.content.strip())
+        return {
+            "semantic_query": parsed.get("semantic_query", message) or message,
+            "date_start": parsed.get("date_start") or None,
+            "date_end": parsed.get("date_end") or None,
+        }
+    except Exception:
+        return fallback
+
+
+_CHAT_SYSTEM_PROMPT = (
+    "You are an email assistant with access to a database of ingested emails. "
+    "When email context is provided, synthesize across all provided emails to give a "
+    "comprehensive answer — do not just describe one email if multiple are relevant. "
+    "Use bullet points for lists of tasks or items. Include the email subject and date "
+    "when referencing a specific email. "
+    "If the context seems incomplete, say so and suggest the user try a more specific query. "
+    "If no relevant context is found, respond: 'I couldn't find relevant emails for that query. "
+    "Try rephrasing or being more specific about the project name, person, or time period.' "
+    "Never invent email content not shown to you."
+)
+
+
+def _generate_sub_queries(semantic_query):
+    """Return 2-3 varied search query rephrases for better recall. Falls back to [semantic_query] on failure."""
+    import json
+    from openai import OpenAI
+    system = (
+        "You are a search query generator for an email database. "
+        "Given a question or topic, return 2-3 short, varied search queries that would find "
+        "relevant emails via semantic similarity. Each query should approach the topic differently. "
+        "Output ONLY a JSON array of strings, e.g. [\"query 1\", \"query 2\"]"
+    )
+    try:
+        client = OpenAI(api_key=app_config.OPENAI_API_KEY)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": semantic_query},
+            ],
+            temperature=0.3,
+            max_tokens=120,
+        )
+        queries = json.loads(resp.choices[0].message.content.strip())
+        if isinstance(queries, list) and all(isinstance(q, str) for q in queries):
+            return queries[:3]
+    except Exception:
+        pass
+    return [semantic_query]
+
+
+@app.route("/api/chat", methods=["POST"])
+def api_chat():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+
+    data = request.get_json(silent=True) or {}
+    user_message = data.get("message", "").strip()
+    reset = data.get("reset", False)
+
+    if not user_message:
+        return jsonify({"error": "message required"}), 400
+
+    if reset:
+        session.pop("chat_response_id", None)
+
+    previous_response_id = session.get("chat_response_id")
+
+    def generate():
+        import json
+        import chroma_helper
+        from openai import OpenAI
+
+        client = OpenAI(api_key=app_config.OPENAI_API_KEY)
+
+        # Extract temporal intent so we can apply a date filter in ChromaDB
+        parsed = _parse_query_for_dates(user_message)
+        semantic_query = parsed["semantic_query"]
+        date_start = parsed["date_start"]
+        date_end = parsed["date_end"]
+
+        where_clause = None
+        if date_start and date_end:
+            where_clause = {"$and": [
+                {"date_received": {"$gte": date_start}},
+                {"date_received": {"$lte": date_end}},
+            ]}
+        elif date_start:
+            where_clause = {"date_received": {"$gte": date_start}}
+        elif date_end:
+            where_clause = {"date_received": {"$lte": date_end}}
+
+        # Generate varied sub-queries for better recall
+        sub_queries = _generate_sub_queries(semantic_query)
+
+        # Multi-query retrieval with deduplication
+        raw_results = chroma_helper.search_emails_multi_query(
+            sub_queries, n_results_each=10, where_clause=where_clause
+        )
+        context = chroma_helper.format_results_as_context(raw_results)
+
+        # Fallback 1: date filter produced no results — retry without it
+        if not context and where_clause is not None:
+            raw_results = chroma_helper.search_emails_multi_query(sub_queries, n_results_each=10)
+            context = chroma_helper.format_results_as_context(raw_results)
+            if context:
+                context = "(Note: No emails found in the specified time period. Showing related emails from other dates:)\n\n" + context
+
+        # Fallback 2: nothing found — loosen distance threshold as last resort
+        if not context:
+            raw_results = chroma_helper.search_emails_multi_query(sub_queries, n_results_each=5)
+            context = chroma_helper.format_results_as_context(raw_results, distance_threshold=1.6)
+            if context:
+                context = "(Note: These emails may be loosely related to your query:)\n\n" + context
+
+        if context:
+            full_input = (
+                f"Relevant emails from the database:\n\n{context}\n\n"
+                f"---\n\nUser question: {user_message}"
+            )
+        else:
+            full_input = (
+                f"(No relevant emails found in the database for this query.)\n\n"
+                f"User question: {user_message}"
+            )
+
+        try:
+            kwargs = {
+                "model": "gpt-4o-mini",
+                "instructions": _CHAT_SYSTEM_PROMPT,
+                "input": full_input,
+                "stream": True,
+            }
+            if previous_response_id:
+                kwargs["previous_response_id"] = previous_response_id
+
+            stream = client.responses.create(**kwargs)
+
+            response_id = None
+            for event in stream:
+                event_type = getattr(event, "type", None)
+
+                if event_type == "response.created":
+                    response_id = event.response.id
+
+                elif event_type == "response.output_text.delta":
+                    chunk = event.delta
+                    if chunk:
+                        yield f"data: {json.dumps({'delta': chunk})}\n\n"
+
+                elif event_type == "response.completed":
+                    if hasattr(event, "response") and event.response.id:
+                        response_id = event.response.id
+
+            if response_id:
+                session["chat_response_id"] = response_id
+                session.modified = True
+
+            yield f"data: {json.dumps({'done': True})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.route("/api/chat/reset", methods=["POST"])
+def api_chat_reset():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    session.pop("chat_response_id", None)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/auth/token-refresh", methods=["POST"])
 def token_refresh():
     """Called periodically by the frontend to silently refresh the access token."""
@@ -285,4 +516,4 @@ def token_refresh():
 
 
 if __name__ == "__main__":
-    app.run(host="localhost", port=5000, debug=True)
+    app.run(host="localhost", port=5000, debug=True, use_reloader=False)
