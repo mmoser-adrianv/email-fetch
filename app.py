@@ -11,7 +11,7 @@ import app_config
 import auth_helper
 import graph_helper
 from flask_migrate import Migrate
-from models import db, save_email_to_db
+from models import db, save_email_to_db, ChatSession, ChatMessage
 
 app = Flask(__name__)
 app.config.from_object(app_config)
@@ -277,7 +277,18 @@ def api_search():
 def chat():
     if not session.get("user"):
         return redirect(url_for("login"))
-    return render_template("chat.html", user=session["user"])
+    user_oid = session["user"].get("oid", "")
+    sessions = (
+        ChatSession.query
+        .filter_by(user_oid=user_oid)
+        .order_by(ChatSession.updated_at.desc())
+        .all()
+    )
+    sessions_data = [
+        {"id": s.id, "title": s.title or "Untitled", "updated_at": s.updated_at.isoformat() if s.updated_at else ""}
+        for s in sessions
+    ]
+    return render_template("chat.html", user=session["user"], chat_sessions=sessions_data)
 
 
 def _parse_query_for_dates(message):
@@ -382,14 +393,39 @@ def api_chat():
     data = request.get_json(silent=True) or {}
     user_message = data.get("message", "").strip()
     reset = data.get("reset", False)
+    load_session_id = data.get("session_id")  # load an existing session
 
     if not user_message:
         return jsonify({"error": "message required"}), 400
 
     if reset:
         session.pop("chat_response_id", None)
+        session.pop("chat_session_id", None)
 
+    # If loading a specific session, restore its response_id
+    if load_session_id:
+        user_oid = session["user"].get("oid", "")
+        db_session = ChatSession.query.filter_by(id=load_session_id, user_oid=user_oid).first()
+        if db_session:
+            session["chat_session_id"] = db_session.id
+            session["chat_response_id"] = db_session.openai_response_id
+
+    user_oid = session["user"].get("oid", "")
     previous_response_id = session.get("chat_response_id")
+
+    # Get or create a ChatSession for this conversation
+    chat_session_id = session.get("chat_session_id")
+    if not chat_session_id:
+        title = user_message[:60]
+        new_db_session = ChatSession(user_oid=user_oid, title=title)
+        db.session.add(new_db_session)
+        db.session.commit()
+        chat_session_id = new_db_session.id
+        session["chat_session_id"] = chat_session_id
+
+    # Save the user message
+    db.session.add(ChatMessage(session_id=chat_session_id, role="user", content=user_message))
+    db.session.commit()
 
     def generate():
         import json
@@ -462,6 +498,7 @@ def api_chat():
             stream = client.responses.create(**kwargs)
 
             response_id = None
+            assistant_text = ""
             for event in stream:
                 event_type = getattr(event, "type", None)
 
@@ -471,6 +508,7 @@ def api_chat():
                 elif event_type == "response.output_text.delta":
                     chunk = event.delta
                     if chunk:
+                        assistant_text += chunk
                         yield f"data: {json.dumps({'delta': chunk})}\n\n"
 
                 elif event_type == "response.completed":
@@ -481,7 +519,17 @@ def api_chat():
                 session["chat_response_id"] = response_id
                 session.modified = True
 
-            yield f"data: {json.dumps({'done': True})}\n\n"
+            # Persist assistant message and update session response_id
+            with app.app_context():
+                if assistant_text and chat_session_id:
+                    db.session.add(ChatMessage(session_id=chat_session_id, role="assistant", content=assistant_text))
+                    db_sess = ChatSession.query.get(chat_session_id)
+                    if db_sess:
+                        db_sess.openai_response_id = response_id
+                        db_sess.updated_at = db.func.now()
+                    db.session.commit()
+
+            yield f"data: {json.dumps({'done': True, 'session_id': chat_session_id})}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -501,6 +549,60 @@ def api_chat_reset():
     if not session.get("user"):
         return jsonify({"error": "login_required"}), 401
     session.pop("chat_response_id", None)
+    session.pop("chat_session_id", None)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/chat/sessions")
+def api_chat_sessions():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    user_oid = session["user"].get("oid", "")
+    sessions = (
+        ChatSession.query
+        .filter_by(user_oid=user_oid)
+        .order_by(ChatSession.updated_at.desc())
+        .all()
+    )
+    return jsonify([
+        {"id": s.id, "title": s.title or "Untitled", "updated_at": s.updated_at.isoformat() if s.updated_at else ""}
+        for s in sessions
+    ])
+
+
+@app.route("/api/chat/sessions/<int:session_id>")
+def api_chat_session(session_id):
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    user_oid = session["user"].get("oid", "")
+    db_session = ChatSession.query.filter_by(id=session_id, user_oid=user_oid).first()
+    if not db_session:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({
+        "id": db_session.id,
+        "title": db_session.title or "Untitled",
+        "openai_response_id": db_session.openai_response_id,
+        "messages": [
+            {"role": m.role, "content": m.content}
+            for m in db_session.messages
+        ],
+    })
+
+
+@app.route("/api/chat/sessions/<int:session_id>", methods=["DELETE"])
+def api_chat_session_delete(session_id):
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    user_oid = session["user"].get("oid", "")
+    db_session = ChatSession.query.filter_by(id=session_id, user_oid=user_oid).first()
+    if not db_session:
+        return jsonify({"error": "not found"}), 404
+    db.session.delete(db_session)
+    db.session.commit()
+    # Clear Flask session if this was the active session
+    if session.get("chat_session_id") == session_id:
+        session.pop("chat_session_id", None)
+        session.pop("chat_response_id", None)
     return jsonify({"ok": True})
 
 

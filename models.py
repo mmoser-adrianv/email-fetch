@@ -70,6 +70,32 @@ class EmailAttachment(db.Model):
     extracted_text = db.Column(db.Text)
 
 
+class ChatSession(db.Model):
+    __tablename__ = "chat_sessions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_oid = db.Column(db.String(64), nullable=False, index=True)
+    title = db.Column(db.String(255))
+    openai_response_id = db.Column(db.String(255))
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+    updated_at = db.Column(db.DateTime, server_default=db.func.now(), onupdate=db.func.now())
+
+    messages = db.relationship(
+        "ChatMessage", backref="session", lazy=True, cascade="all, delete-orphan",
+        order_by="ChatMessage.id"
+    )
+
+
+class ChatMessage(db.Model):
+    __tablename__ = "chat_messages"
+
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.Integer, db.ForeignKey("chat_sessions.id"), nullable=False)
+    role = db.Column(db.String(16))  # "user" or "assistant"
+    content = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+
 def extract_text_from_attachment(filename, content_type, content_bytes):
     """Return scraped text from an attachment, or None if not extractable."""
     ext = os.path.splitext(filename or "")[1].lower()

@@ -4,6 +4,123 @@ const chatInput  = document.getElementById("chat-input");
 const sendBtn    = document.getElementById("send-btn");
 const newChatBtn = document.getElementById("new-chat-btn");
 const errorEl    = document.getElementById("chat-error");
+const sessionList = document.getElementById("session-list");
+
+let activeSessionId = null;
+let sessions = [...INITIAL_SESSIONS];
+
+// ── Sidebar rendering ──────────────────────────────────────────
+
+function renderSidebar() {
+    sessionList.innerHTML = "";
+    sessions.forEach(s => {
+        const item = document.createElement("div");
+        item.className = "session-item" + (s.id === activeSessionId ? " active" : "");
+        item.dataset.id = s.id;
+
+        const title = document.createElement("span");
+        title.className = "session-item-title";
+        title.textContent = s.title || "Untitled";
+        title.title = s.title || "Untitled";
+
+        const del = document.createElement("button");
+        del.className = "session-item-delete";
+        del.textContent = "×";
+        del.title = "Delete";
+        del.addEventListener("click", (e) => {
+            e.stopPropagation();
+            deleteSession(s.id);
+        });
+
+        item.appendChild(title);
+        item.appendChild(del);
+        item.addEventListener("click", () => loadSession(s.id));
+        sessionList.appendChild(item);
+    });
+}
+
+async function refreshSidebar() {
+    try {
+        const resp = await fetch("/api/chat/sessions");
+        if (resp.ok) {
+            sessions = await resp.json();
+            renderSidebar();
+        }
+    } catch (_) {}
+}
+
+// ── Session loading ────────────────────────────────────────────
+
+async function loadSession(id) {
+    try {
+        const resp = await fetch(`/api/chat/sessions/${id}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        activeSessionId = id;
+        clearChat();
+        data.messages.forEach(m => appendMessage(m.role, m.content));
+        renderSidebar();
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+    } catch (_) {}
+}
+
+async function deleteSession(id) {
+    try {
+        await fetch(`/api/chat/sessions/${id}`, { method: "DELETE" });
+        sessions = sessions.filter(s => s.id !== id);
+        if (activeSessionId === id) {
+            activeSessionId = null;
+            clearChat();
+        }
+        renderSidebar();
+    } catch (_) {}
+}
+
+// ── Chat UI helpers ────────────────────────────────────────────
+
+function clearChat() {
+    Array.from(chatWindow.children).forEach(el => {
+        if (el !== thinkingEl) el.remove();
+    });
+    const emptyState = document.createElement("div");
+    emptyState.id = "empty-state";
+    emptyState.innerHTML = `
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        </svg>
+        <p>Email Chat</p>
+        <small>Ask anything about your emails</small>`;
+    chatWindow.insertBefore(emptyState, thinkingEl);
+    errorEl.style.display = "none";
+    chatInput.value = "";
+    sendBtn.disabled = true;
+}
+
+function appendMessage(role, text) {
+    const emptyState = document.getElementById("empty-state");
+    if (emptyState) emptyState.remove();
+
+    const div = document.createElement("div");
+    if (role === "user") {
+        div.className = "msg-user";
+        const bubble = document.createElement("div");
+        bubble.className = "msg-user-bubble";
+        bubble.textContent = text;
+        div.appendChild(bubble);
+    } else {
+        div.className = "msg-assistant";
+        const content = document.createElement("div");
+        content.className = "msg-assistant-content";
+        content.innerHTML = marked.parse(text);
+        div.appendChild(content);
+    }
+    chatWindow.insertBefore(div, thinkingEl);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    return div;
+}
+
+// ── Input handling ─────────────────────────────────────────────
 
 chatInput.addEventListener("input", () => {
     sendBtn.disabled = chatInput.value.trim() === "";
@@ -18,28 +135,14 @@ chatInput.addEventListener("keydown", (e) => {
 
 sendBtn.addEventListener("click", sendMessage);
 
-newChatBtn.addEventListener("click", () => {
-    fetch("/api/chat/reset", { method: "POST" }).catch(() => {});
-    Array.from(chatWindow.children).forEach(el => {
-        if (el !== thinkingEl) el.remove();
-    });
-    errorEl.style.display = "none";
-    chatInput.value = "";
-    sendBtn.disabled = true;
+newChatBtn.addEventListener("click", async () => {
+    await fetch("/api/chat/reset", { method: "POST" }).catch(() => {});
+    activeSessionId = null;
+    clearChat();
+    renderSidebar();
 });
 
-function appendMessage(role, text) {
-    const div = document.createElement("div");
-    div.className = role === "user" ? "msg-user" : "msg-assistant";
-    if (role === "user") {
-        div.textContent = text;
-    } else {
-        div.innerHTML = marked.parse(text);
-    }
-    chatWindow.insertBefore(div, thinkingEl);
-    chatWindow.scrollTop = chatWindow.scrollHeight;
-    return div;
-}
+// ── Send message ───────────────────────────────────────────────
 
 async function sendMessage() {
     const message = chatInput.value.trim();
@@ -55,8 +158,14 @@ async function sendMessage() {
     thinkingEl.style.display = "block";
     chatWindow.scrollTop = chatWindow.scrollHeight;
 
+    const emptyState = document.getElementById("empty-state");
+    if (emptyState) emptyState.remove();
+
     const assistantBubble = document.createElement("div");
     assistantBubble.className = "msg-assistant";
+    const assistantContent = document.createElement("div");
+    assistantContent.className = "msg-assistant-content";
+    assistantBubble.appendChild(assistantContent);
     assistantBubble._rawText = "";
     assistantBubble.style.display = "none";
     chatWindow.insertBefore(assistantBubble, thinkingEl);
@@ -96,13 +205,17 @@ async function sendMessage() {
                     throw new Error(evt.error);
                 }
                 if (evt.done) {
+                    if (evt.session_id && evt.session_id !== activeSessionId) {
+                        activeSessionId = evt.session_id;
+                    }
+                    await refreshSidebar();
                     break;
                 }
                 if (evt.delta) {
                     thinkingEl.style.display = "none";
                     assistantBubble.style.display = "";
                     assistantBubble._rawText += evt.delta;
-                    assistantBubble.innerHTML = marked.parse(assistantBubble._rawText);
+                    assistantContent.innerHTML = marked.parse(assistantBubble._rawText);
                     chatWindow.scrollTop = chatWindow.scrollHeight;
                 }
             }
@@ -118,3 +231,6 @@ async function sendMessage() {
         chatInput.focus();
     }
 }
+
+// ── Init ───────────────────────────────────────────────────────
+renderSidebar();
