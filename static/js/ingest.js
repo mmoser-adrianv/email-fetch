@@ -253,7 +253,17 @@
                 processMessages(email, messages, idx + 1, nextLink);
             })
             .catch(function (err) {
-                finish("Network error: " + err.message);
+                var processed = parseInt(countProcessed.textContent, 10) + 1;
+                countProcessed.textContent = processed;
+
+                var tr = document.createElement("tr");
+                tr.innerHTML = "<td>" + currentRow + "</td>"
+                    + "<td>" + escapeHtml(msg.subject || "") + "</td>"
+                    + "<td>—</td>"
+                    + "<td><span class='badge badge-error'>Error</span></td>";
+                logBody.insertBefore(tr, logBody.firstChild);
+
+                processMessages(email, messages, idx + 1, nextLink);
             });
     }
 
