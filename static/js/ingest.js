@@ -4,8 +4,8 @@
     var goBtn = document.getElementById("go-btn");
     var stopBtn = document.getElementById("stop-btn");
     var progressPanel = document.getElementById("progress-panel");
-    var logWrap = document.getElementById("archive-log-wrap");
-    var logBody = document.getElementById("archive-log-body");
+    var logWrap = document.getElementById("ingest-log-wrap");
+    var logBody = document.getElementById("ingest-log-body");
     var countProcessed = document.getElementById("count-processed");
     var countSaved = document.getElementById("count-saved");
     var countSkipped = document.getElementById("count-skipped");
@@ -123,7 +123,7 @@
         }
     });
 
-    // ── Archive loop ──────────────────────────────────────────────────────────
+    // ── Ingest loop ──────────────────────────────────────────────────────────
 
     goBtn.addEventListener("click", function () {
         if (!selectedEmail) return;
@@ -159,7 +159,7 @@
             return;
         }
 
-        var url = "/api/archive/page?email=" + encodeURIComponent(email);
+        var url = "/api/ingest/page?email=" + encodeURIComponent(email);
         if (nextLink) url += "&nextLink=" + encodeURIComponent(nextLink);
 
         setStatus("Fetching next batch…", true);
@@ -210,7 +210,7 @@
         var currentRow = rowIndex;
         setStatus("Processing: " + escapeHtml(msg.subject || "(no subject)"), true);
 
-        fetch("/api/archive/ingest", {
+        fetch("/api/ingest/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ messageId: msg.id }),

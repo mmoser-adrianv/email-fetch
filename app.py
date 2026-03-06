@@ -178,15 +178,15 @@ def download_file():
             pass
 
 
-@app.route("/archive")
-def archive():
+@app.route("/ingest")
+def ingest():
     if not session.get("user"):
         return redirect(url_for("login"))
-    return render_template("archive.html", user=session["user"])
+    return render_template("ingest.html", user=session["user"])
 
 
-@app.route("/api/archive/page")
-def archive_page():
+@app.route("/api/ingest/page")
+def ingest_page():
     if not session.get("user"):
         return jsonify({"error": "login_required"}), 401
     email = request.args.get("email", "")
@@ -203,14 +203,14 @@ def archive_page():
 
     if messages is None:
         if next_link_out == "group_not_supported":
-            return jsonify({"error": "Group mailboxes are not supported on the archive page."}), 400
+            return jsonify({"error": "Group mailboxes are not supported on the ingest page."}), 400
         return jsonify({"error": "Failed to fetch messages from Microsoft Graph."}), 502
 
     return jsonify({"messages": messages, "nextLink": next_link_out})
 
 
-@app.route("/api/archive/ingest", methods=["POST"])
-def archive_ingest():
+@app.route("/api/ingest/run", methods=["POST"])
+def ingest_run():
     if not session.get("user"):
         return jsonify({"error": "login_required"}), 401
     data = request.get_json(silent=True) or {}

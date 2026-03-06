@@ -241,7 +241,7 @@ td:last-child {
     to { transform: rotate(360deg); }
 }
 
-/* Archive page */
+/* Ingest page */
 .btn-stop {
     background: #d32f2f;
     color: #fff;
@@ -272,7 +272,7 @@ td:last-child {
     padding-left: 2px;
 }
 
-#archive-log-wrap {
+#ingest-log-wrap {
     margin-top: 8px;
 }
 

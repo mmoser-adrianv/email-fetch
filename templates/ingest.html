@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Email Archive{% endblock %}
+{% block title %}Email Ingest{% endblock %}
 {% block styles %}
 <style>
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -67,7 +67,7 @@
 </style>
 {% endblock %}
 {% block content %}
-<h1>Archive Emails to Database</h1>
+<h1>Ingest Emails to Database</h1>
 <div class="search-container">
     <div class="search-wrapper">
         <input type="text" id="people-search" placeholder="Type a name or email..." autocomplete="off">
@@ -90,8 +90,8 @@
     </div>
 </div>
 
-<div id="archive-log-wrap" style="display:none;">
-    <table id="archive-log">
+<div id="ingest-log-wrap" style="display:none;">
+    <table id="ingest-log">
         <thead>
             <tr>
                 <th>#</th>
@@ -100,11 +100,11 @@
                 <th>Result</th>
             </tr>
         </thead>
-        <tbody id="archive-log-body"></tbody>
+        <tbody id="ingest-log-body"></tbody>
     </table>
 </div>
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/archive.js') }}"></script>
+<script src="{{ url_for('static', filename='js/ingest.js') }}"></script>
 {% endblock %}
