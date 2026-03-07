@@ -1,6 +1,7 @@
 import base64
 import html
 import os
+import re
 from html.parser import HTMLParser
 from io import BytesIO
 
@@ -41,6 +42,83 @@ def strip_html_tags(raw: str) -> str:
     return html.unescape("".join(stripper._parts))
 
 
+# Patterns that always start a new paragraph when encountered inline.
+_PARA_BREAK_BEFORE = re.compile(
+    r'(?<!\n)'
+    r'('
+    r'From:\s|Sent:\s|To:\s|Cc:\s|Subject:\s'
+    r'|Thanks\s*&\s*Regards|Warm\s+Regards|Best\s+Regards|Kind\s+Regards'
+    r'|-----\s*Original'
+    r')',
+    re.IGNORECASE,
+)
+
+# Bullet variants to normalise to "- ".
+_BULLET_RE = re.compile(r'^[\u2022\u2023\u25e6\u2043\u2219*]\s+', re.MULTILINE)
+
+
+def clean_body_for_export(text: str) -> str:
+    """Clean extracted email body text for JSONB storage / export.
+
+    Fixes structural issues (run-on lines, broken line breaks, noisy metadata)
+    without rewriting or summarising any content.
+    """
+    if not text:
+        return text
+
+    # 1. Normalise line endings.
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # 2. Non-breaking spaces act as paragraph separators in stripped HTML —
+    #    convert each run to a single newline.
+    text = re.sub(r'\xa0+', '\n', text)
+
+    # 3. Remove literal backslash-n sequences (not real newlines).
+    text = text.replace('\\n', ' ')
+
+    # 4. Replace corrupted/replacement characters (e.g. mangled em-dashes).
+    text = text.replace('\ufffd', '\u2013')  # U+FFFD → en-dash
+    # Drop other non-printable control characters (except newline/tab).
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
+
+    # 5. Insert paragraph breaks before structural email markers.
+    text = _PARA_BREAK_BEFORE.sub(r'\n\n\1', text)
+
+    # 6. Rejoin lines broken mid-phrase (multiple passes).
+    #    a) No terminal punctuation, continuation starts with lowercase or digit.
+    text = re.sub(r'(?<![.!?:,\-])\n(?=[a-z0-9])', ' ', text)
+    #    b) Line ends with a dangling conjunction, preposition, or & (clearly
+    #       mid-phrase even when the next word is capitalised).
+    text = re.sub(
+        r'(\b(?:of|and|or|the|an?|to|for|with|by|as|in|on|at|its|our|their|a)\b|&)'
+        r'\s*\n\s*(\S)',
+        r'\1 \2',
+        text,
+        flags=re.IGNORECASE,
+    )
+    #    c) A single capitalised word on its own line that follows a line
+    #       without terminal punctuation is very likely a split heading/label.
+    text = re.sub(r'(?<![.!?:\n])\n([A-Z][a-z]+\n)', r' \1', text)
+
+    # 7. Collapse runs of 3+ newlines to a single blank line.
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # 8. Normalise horizontal whitespace within each line.
+    text = re.sub(r'[^\S\n]{2,}', ' ', text)
+
+    # 9. Strip leading/trailing whitespace per line.
+    lines = [line.strip() for line in text.split('\n')]
+    text = '\n'.join(lines)
+
+    # 10. Standardise bullet points to "- ".
+    text = _BULLET_RE.sub('- ', text)
+
+    # 11. Remove duplicate consecutive blank lines introduced by earlier steps.
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
+
+
 class Email(db.Model):
     __tablename__ = "emails"
 
@@ -53,6 +131,7 @@ class Email(db.Model):
     subject = db.Column(db.Text)
     body = db.Column(db.Text)
     body_text = db.Column(db.Text)  # HTML-stripped plain text
+    searched_email = db.Column(db.String(255), index=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
     attachments = db.relationship(
@@ -133,7 +212,7 @@ def extract_text_from_attachment(filename, content_type, content_bytes):
     return None
 
 
-def save_email_to_db(message_detail, attachment_list):
+def save_email_to_db(message_detail, attachment_list, searched_email=None):
     """Persist one email + its attachments. Returns (saved: bool, skipped: bool).
 
     Uses the Graph API message id as the deduplication key.
@@ -145,11 +224,17 @@ def save_email_to_db(message_detail, attachment_list):
     if not graph_id:
         return False, False
 
-    # Duplicate check — backfill body_text if missing
+    # Duplicate check — backfill any missing fields on existing records
     existing = Email.query.filter_by(message_id=graph_id).first()
     if existing:
+        updated = False
         if existing.body_text is None and existing.body:
             existing.body_text = strip_html_tags(existing.body)
+            updated = True
+        if existing.searched_email is None and searched_email:
+            existing.searched_email = searched_email
+            updated = True
+        if updated:
             db.session.commit()
         return False, True
 
@@ -193,6 +278,7 @@ def save_email_to_db(message_detail, attachment_list):
         subject=message_detail.get("subject", "(no subject)"),
         body=body_content,
         body_text=body_text_content,
+        searched_email=searched_email,
     )
     db.session.add(email_row)
     db.session.flush()  # get email_row.id before committing

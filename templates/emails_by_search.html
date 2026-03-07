@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block title %}Emails by Search Address{% endblock %}
+{% block styles %}
+<style>
+.email-address-list {
+    margin-bottom: 24px;
+}
+.email-address-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border: 1px solid #dde1e7;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    background: #fff;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.email-address-row:hover,
+.email-address-row.active {
+    background: #f0f6ff;
+    border-color: #0078d4;
+}
+.email-address-label {
+    font-weight: 600;
+    font-size: 0.97em;
+}
+.email-count-badge {
+    background: #0078d4;
+    color: #fff;
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 0.82em;
+    font-weight: 600;
+}
+#emails-panel {
+    display: none;
+}
+#emails-panel h2 {
+    font-size: 1.05em;
+    margin-bottom: 12px;
+    color: #333;
+}
+#emails-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+#emails-table th {
+    text-align: left;
+    font-size: 0.83em;
+    text-transform: uppercase;
+    color: #666;
+    border-bottom: 2px solid #dde1e7;
+    padding: 6px 10px;
+}
+#emails-table td {
+    padding: 9px 10px;
+    font-size: 0.92em;
+    border-bottom: 1px solid #f0f0f0;
+    vertical-align: top;
+}
+#emails-table tr:last-child td {
+    border-bottom: none;
+}
+.no-data {
+    color: #888;
+    font-size: 0.92em;
+    padding: 12px 0;
+}
+#emails-loading {
+    color: #555;
+    font-size: 0.9em;
+    margin: 8px 0;
+    display: none;
+}
+</style>
+{% endblock %}
+{% block content %}
+<h1>Emails by Search Address</h1>
+<p style="color:#555; margin-bottom:20px;">Emails ingested from the Ingest page, grouped by the email address used to search for them.</p>
+
+<div id="address-list-loading" class="no-data">Loading...</div>
+<div id="no-addresses" class="no-data" style="display:none;">No ingested emails with a tracked search address yet. Use the <a href="{{ url_for('ingest') }}">Ingest</a> page to import emails.</div>
+<div id="address-list" class="email-address-list"></div>
+
+<div id="emails-panel">
+    <h2 id="emails-panel-title"></h2>
+    <div id="emails-loading">Loading emails...</div>
+    <table id="emails-table" style="display:none;">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Subject</th>
+                <th>Sender</th>
+                <th>Date</th>
+                <th>Attachments</th>
+            </tr>
+        </thead>
+        <tbody id="emails-tbody"></tbody>
+    </table>
+    <div id="emails-empty" class="no-data" style="display:none;">No emails found for this address.</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    var addressList = document.getElementById("address-list");
+    var addressListLoading = document.getElementById("address-list-loading");
+    var noAddresses = document.getElementById("no-addresses");
+    var emailsPanel = document.getElementById("emails-panel");
+    var emailsPanelTitle = document.getElementById("emails-panel-title");
+    var emailsLoading = document.getElementById("emails-loading");
+    var emailsTable = document.getElementById("emails-table");
+    var emailsTbody = document.getElementById("emails-tbody");
+    var emailsEmpty = document.getElementById("emails-empty");
+    var activeRow = null;
+
+    function formatDate(iso) {
+        if (!iso) return "—";
+        var d = new Date(iso);
+        return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
+    function escapeHtml(text) {
+        var div = document.createElement("div");
+        div.textContent = text || "";
+        return div.innerHTML;
+    }
+
+    function loadEmails(email, row) {
+        if (activeRow) activeRow.classList.remove("active");
+        activeRow = row;
+        row.classList.add("active");
+
+        emailsPanel.style.display = "";
+        emailsPanelTitle.textContent = "Emails ingested for: " + email;
+        emailsLoading.style.display = "";
+        emailsTable.style.display = "none";
+        emailsEmpty.style.display = "none";
+        emailsTbody.innerHTML = "";
+
+        fetch("/api/emails/by-search/" + encodeURIComponent(email))
+            .then(function (res) {
+                if (res.status === 401) { window.location.href = "/login"; return null; }
+                return res.json();
+            })
+            .then(function (data) {
+                emailsLoading.style.display = "none";
+                if (!data) return;
+                if (data.length === 0) {
+                    emailsEmpty.style.display = "";
+                    return;
+                }
+                data.forEach(function (email, idx) {
+                    var tr = document.createElement("tr");
+                    tr.innerHTML = "<td>" + (idx + 1) + "</td>"
+                        + "<td>" + escapeHtml(email.subject || "(no subject)") + "</td>"
+                        + "<td>" + escapeHtml(email.sender_name ? email.sender_name + " &lt;" + email.sender_email + "&gt;" : email.sender_email) + "</td>"
+                        + "<td style='white-space:nowrap'>" + escapeHtml(formatDate(email.date_received)) + "</td>"
+                        + "<td>" + (email.attachment_count > 0 ? email.attachment_count : "—") + "</td>";
+                    emailsTbody.appendChild(tr);
+                });
+                emailsTable.style.display = "";
+                emailsPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            })
+            .catch(function () {
+                emailsLoading.style.display = "none";
+                emailsEmpty.textContent = "Error loading emails.";
+                emailsEmpty.style.display = "";
+            });
+    }
+
+    fetch("/api/emails/by-search")
+        .then(function (res) {
+            if (res.status === 401) { window.location.href = "/login"; return null; }
+            return res.json();
+        })
+        .then(function (data) {
+            addressListLoading.style.display = "none";
+            if (!data) return;
+            if (data.length === 0) {
+                noAddresses.style.display = "";
+                return;
+            }
+            data.forEach(function (item) {
+                var row = document.createElement("div");
+                row.className = "email-address-row";
+                row.innerHTML = "<span class='email-address-label'>" + escapeHtml(item.searched_email) + "</span>"
+                    + "<span class='email-count-badge'>" + item.count + " email" + (item.count !== 1 ? "s" : "") + "</span>";
+                row.addEventListener("click", function () {
+                    loadEmails(item.searched_email, row);
+                });
+                addressList.appendChild(row);
+            });
+        })
+        .catch(function () {
+            addressListLoading.textContent = "Error loading data.";
+        });
+})();
+</script>
+{% endblock %}

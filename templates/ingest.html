@@ -67,7 +67,10 @@
 </style>
 {% endblock %}
 {% block content %}
-<h1>Ingest Emails to Database</h1>
+<div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+    <h1 style="margin:0;">Ingest Emails to Database</h1>
+    <a href="/api/emails/export" class="btn btn-secondary" download>Download All Emails (JSONB)</a>
+</div>
 <div class="search-container">
     <div class="search-wrapper">
         <input type="text" id="people-search" placeholder="Type a name or email..." autocomplete="off">

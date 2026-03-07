@@ -213,7 +213,7 @@
         fetch("/api/ingest/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ messageId: msg.id }),
+            body: JSON.stringify({ messageId: msg.id, searchedEmail: email }),
         })
             .then(function (res) {
                 if (res.status === 401) { window.location.href = "/login"; return null; }

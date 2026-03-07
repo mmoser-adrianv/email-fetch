@@ -1,3 +1,4 @@
+import json
 import os
 
 from flask import (
@@ -11,7 +12,7 @@ import app_config
 import auth_helper
 import graph_helper
 from flask_migrate import Migrate
-from models import db, save_email_to_db, ChatSession, ChatMessage
+from models import db, save_email_to_db, ChatSession, ChatMessage, Email
 
 app = Flask(__name__)
 app.config.from_object(app_config)
@@ -178,6 +179,41 @@ def download_file():
             pass
 
 
+@app.route("/api/emails/export")
+def export_emails_json():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    emails = Email.query.options(db.joinedload(Email.attachments)).all()
+    data = []
+    for email in emails:
+        data.append({
+            "id": email.id,
+            "message_id": email.message_id,
+            "sender_email": email.sender_email,
+            "sender_name": email.sender_name,
+            "recipients": json.loads(email.recipients) if email.recipients else [],
+            "date_received": email.date_received.isoformat() if email.date_received else None,
+            "subject": email.subject,
+            "body": email.body_text,
+            "attachments": [
+                {
+                    "filename": a.filename,
+                    "content_type": a.content_type,
+                    "extracted_text": a.extracted_text,
+                }
+                for a in email.attachments
+            ],
+        })
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    return Response(
+        json_bytes,
+        mimetype="application/json",
+        headers={"Content-Disposition": f'attachment; filename="emails_{timestamp}.jsonb"'},
+    )
+
+
 @app.route("/ingest")
 def ingest():
     if not session.get("user"):
@@ -215,6 +251,7 @@ def ingest_run():
         return jsonify({"error": "login_required"}), 401
     data = request.get_json(silent=True) or {}
     message_id = data.get("messageId", "")
+    searched_email = data.get("searchedEmail", "") or None
     if not message_id:
         return jsonify({"error": "messageId required"}), 400
     token = auth_helper.get_token_from_cache()
@@ -231,7 +268,7 @@ def ingest_run():
     if detail.get("hasAttachments"):
         attachments = graph_helper.get_message_attachments(access_token, message_id)
 
-    saved, skipped = save_email_to_db(detail, attachments)
+    saved, skipped = save_email_to_db(detail, attachments, searched_email=searched_email)
 
     if saved:
         try:
@@ -249,6 +286,48 @@ def ingest_run():
         "subject": detail.get("subject", "(no subject)"),
         "attachmentCount": len(attachments),
     })
+
+
+@app.route("/emails-by-search")
+def emails_by_search():
+    if not session.get("user"):
+        return redirect(url_for("login"))
+    return render_template("emails_by_search.html", user=session["user"])
+
+
+@app.route("/api/emails/by-search")
+def api_emails_by_search_list():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    from sqlalchemy import func
+    rows = (
+        db.session.query(Email.searched_email, func.count(Email.id).label("count"))
+        .filter(Email.searched_email.isnot(None))
+        .group_by(Email.searched_email)
+        .order_by(func.count(Email.id).desc())
+        .all()
+    )
+    return jsonify([{"searched_email": r.searched_email, "count": r.count} for r in rows])
+
+
+@app.route("/api/emails/by-search/<path:email>")
+def api_emails_by_search_detail(email):
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    emails = (
+        Email.query
+        .filter_by(searched_email=email)
+        .order_by(Email.date_received.desc())
+        .all()
+    )
+    return jsonify([{
+        "id": e.id,
+        "subject": e.subject,
+        "sender_email": e.sender_email,
+        "sender_name": e.sender_name,
+        "date_received": e.date_received.isoformat() if e.date_received else None,
+        "attachment_count": len(e.attachments),
+    } for e in emails])
 
 
 @app.route("/search")
