@@ -212,6 +212,132 @@ def extract_text_from_attachment(filename, content_type, content_bytes):
     return None
 
 
+class TeamsChat(db.Model):
+    __tablename__ = "teams_chats"
+
+    id = db.Column(db.Integer, primary_key=True)
+    chat_id = db.Column(db.String(512), unique=True, nullable=False, index=True)
+    display_name = db.Column(db.String(512), nullable=True)
+    chat_type = db.Column(db.String(64), nullable=True)
+    last_updated_date_time = db.Column(db.DateTime(timezone=True), nullable=True)
+    member_count = db.Column(db.Integer, nullable=True)
+    scraped_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    messages = db.relationship(
+        "TeamsMessage", backref="chat", lazy=True, cascade="all, delete-orphan",
+        order_by="TeamsMessage.id"
+    )
+
+
+class TeamsMessage(db.Model):
+    __tablename__ = "teams_messages"
+
+    id = db.Column(db.Integer, primary_key=True)
+    teams_chat_id = db.Column(db.Integer, db.ForeignKey("teams_chats.id"), nullable=False)
+    message_id = db.Column(db.String(512), unique=True, nullable=False, index=True)
+    sender_name = db.Column(db.String(255), nullable=True)
+    sender_email = db.Column(db.String(255), nullable=True)
+    content_html = db.Column(db.Text, nullable=True)
+    content_text = db.Column(db.Text, nullable=True)
+    created_date_time = db.Column(db.DateTime(timezone=True), nullable=True)
+    message_type = db.Column(db.String(64), nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+
+def upsert_teams_chat(chat_data):
+    """Create or update a TeamsChat row from a Graph API chat object.
+
+    chat_data keys: id, topic (optional), chatType (optional),
+    lastUpdatedDateTime (optional).
+    Returns the TeamsChat row.
+    """
+    from datetime import datetime, timezone
+
+    chat_id = chat_data.get("id", "")
+    if not chat_id:
+        return None
+
+    row = TeamsChat.query.filter_by(chat_id=chat_id).first()
+    if not row:
+        row = TeamsChat(chat_id=chat_id)
+        db.session.add(row)
+
+    row.display_name = chat_data.get("topic") or chat_data.get("display_name")
+    row.chat_type = chat_data.get("chatType")
+
+    lud = chat_data.get("lastUpdatedDateTime")
+    if lud:
+        try:
+            row.last_updated_date_time = datetime.fromisoformat(
+                lud.replace("Z", "+00:00")
+            )
+        except ValueError:
+            pass
+
+    db.session.commit()
+    return row
+
+
+def save_teams_messages_to_db(chat_id_str, messages_batch):
+    """Insert new Teams messages, skipping duplicates and system events.
+
+    Returns {"saved": N, "skipped": M}.
+    """
+    from datetime import datetime, timezone
+
+    chat_row = TeamsChat.query.filter_by(chat_id=chat_id_str).first()
+    if not chat_row:
+        return {"saved": 0, "skipped": len(messages_batch)}
+
+    saved = 0
+    skipped = 0
+
+    for msg in messages_batch:
+        msg_id = msg.get("id", "")
+        if not msg_id:
+            skipped += 1
+            continue
+
+        # Skip system event messages (joins, renames, etc.)
+        if msg.get("messageType", "message") != "message":
+            skipped += 1
+            continue
+
+        # Skip duplicates
+        if TeamsMessage.query.filter_by(message_id=msg_id).first():
+            skipped += 1
+            continue
+
+        content_html = msg.get("contentHtml") or ""
+        content_text = strip_html_tags(content_html) if content_html else ""
+
+        created_str = msg.get("createdDateTime", "")
+        created_dt = None
+        if created_str:
+            try:
+                created_dt = datetime.fromisoformat(
+                    created_str.replace("Z", "+00:00")
+                )
+            except ValueError:
+                pass
+
+        db.session.add(TeamsMessage(
+            teams_chat_id=chat_row.id,
+            message_id=msg_id,
+            sender_name=msg.get("senderName") or "",
+            sender_email=msg.get("senderEmail") or "",
+            content_html=content_html,
+            content_text=content_text,
+            created_date_time=created_dt,
+            message_type=msg.get("messageType", "message"),
+        ))
+        saved += 1
+
+    db.session.commit()
+    return {"saved": saved, "skipped": skipped}
+
+
 def save_email_to_db(message_detail, attachment_list, searched_email=None):
     """Persist one email + its attachments. Returns (saved: bool, skipped: bool).
 

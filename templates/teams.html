@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Teams Chat Scraper{% endblock %}
+{% block styles %}
+<style>
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Indeterminate progress bar */
+#progress-bar {
+    height: 6px;
+    background: #e0e0e0;
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 8px 0 12px;
+}
+.progress-bar-inner {
+    height: 100%;
+    width: 40%;
+    background: linear-gradient(90deg, #0078d4, #50a8f5);
+    border-radius: 3px;
+    animation: progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes progress-slide {
+    0%   { margin-left: -40%; }
+    100% { margin-left: 100%; }
+}
+
+/* Search spinner inside the input */
+#search-spinner {
+    display: none;
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 14px;
+    height: 14px;
+    border: 2px solid #ccc;
+    border-top-color: #555;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    pointer-events: none;
+}
+.search-wrapper { position: relative; }
+
+/* Accent border on the counter box while running */
+#progress-panel.is-running .progress-summary {
+    border-left: 3px solid #0078d4;
+    padding-left: 13px;
+}
+
+/* Stop button pulse while running */
+#stop-btn {
+    animation: stop-pulse 2s ease-in-out infinite;
+}
+@keyframes stop-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.7; }
+}
+
+/* Status message row */
+#status-msg {
+    display: flex;
+    align-items: center;
+    font-weight: 500;
+    font-size: 0.95em;
+    color: #333;
+}
+</style>
+{% endblock %}
+{% block content %}
+<h1 style="margin-bottom:16px;">Teams Chat Scraper</h1>
+
+<div class="search-container">
+    <div class="search-wrapper">
+        <input type="text" id="chat-search" placeholder="Type a group chat name..." autocomplete="off">
+        <span id="search-spinner"></span>
+        <div id="suggestions-dropdown" class="dropdown"></div>
+    </div>
+    <button id="scrape-btn" class="btn btn-primary" disabled>Scrape</button>
+    <button id="stop-btn" class="btn btn-stop" style="display:none;">Stop</button>
+</div>
+
+<div id="progress-panel" style="display:none;">
+    <div class="progress-summary">
+        Processed: <strong id="count-processed">0</strong> &nbsp;&nbsp;
+        Saved: <strong id="count-saved">0</strong> &nbsp;&nbsp;
+        Skipped (duplicate/system): <strong id="count-skipped">0</strong>
+    </div>
+    <div id="progress-bar" style="display:none;"><div class="progress-bar-inner"></div></div>
+    <div id="status-msg" class="status-msg">
+        <span id="status-text"></span>
+    </div>
+</div>
+
+<div id="scrape-log-wrap" style="display:none;">
+    <table id="scrape-log">
+        <thead>
+            <tr>
+                <th>Batch #</th>
+                <th>Date Range</th>
+                <th>Messages</th>
+                <th>Result</th>
+            </tr>
+        </thead>
+        <tbody id="scrape-log-body"></tbody>
+    </table>
+</div>
+
+<hr style="margin: 32px 0;">
+
+<h2 style="margin-bottom:12px;">Previously Scraped Chats</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Chat Name</th>
+            <th>Members</th>
+            <th>Messages</th>
+            <th>Last Scraped</th>
+            <th>Download</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for chat in scraped_chats %}
+        <tr>
+            <td>{{ chat.display_name or "(unnamed)" }}</td>
+            <td>{{ chat.member_count if chat.member_count is not none else "—" }}</td>
+            <td>{{ chat.message_count }}</td>
+            <td>{{ chat.scraped_at.strftime('%Y-%m-%d %H:%M') if chat.scraped_at else "—" }}</td>
+            <td>
+                {% if chat.message_count > 0 %}
+                <a href="{{ url_for('api_teams_messages_export', chatId=chat.chat_id) }}" class="btn btn-secondary" download>JSON</a>
+                {% else %}—{% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" style="color:#888; text-align:center; padding:16px;">No chats scraped yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/teams.js') }}"></script>
+{% endblock %}

@@ -12,7 +12,10 @@ import app_config
 import auth_helper
 import graph_helper
 from flask_migrate import Migrate
-from models import db, save_email_to_db, ChatSession, ChatMessage, Email
+from models import (
+    db, save_email_to_db, ChatSession, ChatMessage, Email,
+    TeamsChat, TeamsMessage, upsert_teams_chat, save_teams_messages_to_db,
+)
 
 app = Flask(__name__)
 app.config.from_object(app_config)
@@ -682,6 +685,184 @@ def api_chat_session_delete(session_id):
         session.pop("chat_session_id", None)
         session.pop("chat_response_id", None)
     return jsonify({"ok": True})
+
+
+# ── Teams Chat Scraper ────────────────────────────────────────────────────────
+
+@app.route("/teams")
+def teams():
+    if not session.get("user"):
+        return redirect(url_for("login"))
+
+    chats = (
+        TeamsChat.query
+        .order_by(TeamsChat.scraped_at.desc().nullslast())
+        .all()
+    )
+    scraped_chats = [
+        {
+            "chat_id": c.chat_id,
+            "display_name": c.display_name,
+            "member_count": c.member_count,
+            "scraped_at": c.scraped_at,
+            "message_count": len(c.messages),
+        }
+        for c in chats
+    ]
+    return render_template("teams.html", user=session["user"], scraped_chats=scraped_chats)
+
+
+@app.route("/api/teams/chats/search")
+def api_teams_chats_search():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    token = auth_helper.get_token_from_cache()
+    if not token or "access_token" not in token:
+        return jsonify({"error": "login_required"}), 401
+
+    q = request.args.get("q", "").strip()
+    if len(q) < 2:
+        return jsonify([])
+
+    result = graph_helper.search_teams_chats(token["access_token"], q)
+    if isinstance(result, dict) and "error" in result:
+        err_code = (result.get("error") or {}).get("error", {}).get("code", "")
+        if err_code in ("InvalidAuthenticationToken", "AuthenticationError", "Unauthorized"):
+            return jsonify({"error": "login_required"}), 401
+        return jsonify(result), 502
+    return jsonify(result)
+
+
+@app.route("/api/teams/messages/page")
+def api_teams_messages_page():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    token = auth_helper.get_token_from_cache()
+    if not token or "access_token" not in token:
+        return jsonify({"error": "login_required"}), 401
+
+    chat_id = request.args.get("chatId", "").strip()
+    if not chat_id:
+        return jsonify({"error": "chatId required"}), 400
+
+    next_link = request.args.get("nextLink") or None
+    messages, next_link_out = graph_helper.get_teams_messages_page(
+        token["access_token"], chat_id, next_link=next_link
+    )
+    if messages is None:
+        err_detail = next_link_out or {}
+        return jsonify({"error": "Failed to fetch messages from Graph API", "detail": err_detail}), 502
+
+    return jsonify({"messages": messages, "nextLink": next_link_out})
+
+
+@app.route("/api/teams/messages/save", methods=["POST"])
+def api_teams_messages_save():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+
+    data = request.get_json(force=True) or {}
+    chat_id = data.get("chatId", "").strip()
+    chat_topic = data.get("chatTopic", "")
+    messages = data.get("messages", [])
+
+    if not chat_id:
+        return jsonify({"error": "chatId required"}), 400
+
+    upsert_teams_chat({"id": chat_id, "topic": chat_topic})
+    result = save_teams_messages_to_db(chat_id, messages)
+    return jsonify(result)
+
+
+@app.route("/api/teams/chats/complete", methods=["POST"])
+def api_teams_chats_complete():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    token = auth_helper.get_token_from_cache()
+    if not token or "access_token" not in token:
+        return jsonify({"error": "login_required"}), 401
+
+    chat_id = request.args.get("chatId", "").strip()
+    if not chat_id:
+        return jsonify({"error": "chatId required"}), 400
+
+    from datetime import datetime
+    chat_row = TeamsChat.query.filter_by(chat_id=chat_id).first()
+    if chat_row:
+        chat_row.scraped_at = datetime.utcnow()
+        member_count = graph_helper.get_teams_chat_members_count(token["access_token"], chat_id)
+        if member_count is not None:
+            chat_row.member_count = member_count
+        from models import db as _db
+        _db.session.commit()
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/teams/chats")
+def api_teams_chats_list():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+
+    chats = TeamsChat.query.order_by(TeamsChat.scraped_at.desc().nullslast()).all()
+    return jsonify([
+        {
+            "id": c.id,
+            "chat_id": c.chat_id,
+            "display_name": c.display_name,
+            "member_count": c.member_count,
+            "scraped_at": c.scraped_at.isoformat() if c.scraped_at else None,
+            "message_count": len(c.messages),
+        }
+        for c in chats
+    ])
+
+
+@app.route("/api/teams/messages/export")
+def api_teams_messages_export():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+
+    chat_id = request.args.get("chatId", "").strip()
+    if not chat_id:
+        return jsonify({"error": "chatId required"}), 400
+
+    chat = TeamsChat.query.filter_by(chat_id=chat_id).first()
+    if not chat:
+        return jsonify({"error": "Chat not found"}), 404
+
+    messages = (
+        TeamsMessage.query
+        .filter_by(teams_chat_id=chat.id)
+        .order_by(TeamsMessage.created_date_time.asc())
+        .all()
+    )
+
+    payload = {
+        "chat_id": chat.chat_id,
+        "display_name": chat.display_name,
+        "member_count": chat.member_count,
+        "scraped_at": chat.scraped_at.isoformat() if chat.scraped_at else None,
+        "messages": [
+            {
+                "message_id": m.message_id,
+                "sender_name": m.sender_name,
+                "sender_email": m.sender_email,
+                "created_date_time": m.created_date_time.isoformat() if m.created_date_time else None,
+                "content": m.content_text,
+            }
+            for m in messages
+        ],
+    }
+
+    safe_name = (chat.display_name or chat.chat_id)[:40].replace(" ", "_")
+    filename = f"teams_{safe_name}.json"
+
+    return Response(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        mimetype="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.route("/api/auth/token-refresh", methods=["POST"])

@@ -457,6 +457,91 @@ def download_emails_zip(access_token, result_info):
     return zip_buffer
 
 
+def search_teams_chats(access_token, query):
+    """Search the signed-in user's group chats by topic name.
+
+    Returns a list of chat dicts with keys: id, topic, chatType,
+    lastUpdatedDateTime. Falls back to fetching all group chats and
+    filtering client-side if the tenant does not support $search on chats.
+    Returns {"error": ...} on unrecoverable failure.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = (
+        f"{GRAPH_URL}/me/chats"
+        f'?$search="{query}"'
+        f"&$filter=chatType eq 'group'"
+        f"&$select=id,topic,chatType,lastUpdatedDateTime"
+        f"&$top=20"
+    )
+    response = requests.get(url, headers=headers, timeout=15)
+
+    if response.status_code == 200:
+        return response.json().get("value", [])
+
+    # Some tenants do not support $search on /me/chats — fall back to a
+    # plain fetch with client-side filtering.
+    if response.status_code in (400, 501):
+        fb = requests.get(f"{GRAPH_URL}/me/chats", headers=headers, timeout=15)
+        if fb.status_code == 200:
+            q_lower = query.lower()
+            return [
+                c for c in fb.json().get("value", [])
+                if c.get("chatType") == "group"
+                and q_lower in (c.get("topic") or "").lower()
+            ]
+        return {"error": {"fallback_status": fb.status_code, "detail": fb.json()}}
+
+    return {"error": response.json()}
+
+
+def get_teams_chat_members_count(access_token, chat_id):
+    """Return the number of members in a Teams chat, or None on failure."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"{GRAPH_URL}/chats/{chat_id}/members?$select=id"
+    response = requests.get(url, headers=headers, timeout=10)
+    if response.status_code != 200:
+        return None
+    return len(response.json().get("value", []))
+
+
+def get_teams_messages_page(access_token, chat_id, next_link=None, top=50):
+    """Fetch one page of messages from a Teams chat.
+
+    Returns (messages_list, next_link_or_None).
+    Each message dict has: id, messageType, createdDateTime,
+    senderName, senderEmail, contentHtml.
+
+    Note: Graph API returns the sender's displayName but not their email
+    address in chatMessage resources. senderEmail is stored as empty string.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    if next_link:
+        url = next_link
+    else:
+        url = f"{GRAPH_URL}/chats/{chat_id}/messages?$top={top}"
+
+    response = requests.get(url, headers=headers, timeout=30)
+    if response.status_code != 200:
+        return None, {"graph_status": response.status_code, "detail": response.json()}
+
+    data = response.json()
+    messages = []
+    for m in data.get("value", []):
+        from_user = (m.get("from") or {}).get("user") or {}
+        messages.append({
+            "id": m.get("id", ""),
+            "messageType": m.get("messageType", "message"),
+            "createdDateTime": m.get("createdDateTime", ""),
+            "senderName": from_user.get("displayName", ""),
+            "senderEmail": "",  # not available in chatMessage resource
+            "contentHtml": (m.get("body") or {}).get("content", ""),
+        })
+
+    next_link_out = data.get("@odata.nextLink")
+    return messages, next_link_out
+
+
 def download_emails_zip_progress(access_token, result_info):
     """Generator that yields SSE events while building the ZIP.
 
