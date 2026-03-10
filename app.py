@@ -13,8 +13,9 @@ import auth_helper
 import graph_helper
 from flask_migrate import Migrate
 from models import (
-    db, save_email_to_db, ChatSession, ChatMessage, Email,
-    TeamsChat, TeamsMessage, upsert_teams_chat, save_teams_messages_to_db,
+    db, save_email_to_db, ChatSession, ChatMessage, Email, Project,
+    TeamsChat, TeamsMessage,
+    upsert_teams_chat, save_teams_messages_to_db, clean_body_for_export,
 )
 
 app = Flask(__name__)
@@ -186,26 +187,37 @@ def download_file():
 def export_emails_json():
     if not session.get("user"):
         return jsonify({"error": "login_required"}), 401
-    emails = Email.query.options(db.joinedload(Email.attachments)).all()
+    project_id = request.args.get("project_id", type=int)
+    query = Email.query.options(
+        db.joinedload(Email.attachments),
+        db.joinedload(Email.project),
+    )
+    if project_id:
+        query = query.filter(Email.project_id == project_id)
+    emails = query.all()
     data = []
     for email in emails:
+        # Use new separate fields; fall back to legacy merged recipients for old rows
+        to = json.loads(email.to_recipients) if email.to_recipients else (
+            json.loads(email.recipients) if email.recipients else []
+        )
+        cc = json.loads(email.cc_recipients) if email.cc_recipients else []
+        bcc = json.loads(email.bcc_recipients) if email.bcc_recipients else []
         data.append({
             "id": email.id,
             "message_id": email.message_id,
-            "sender_email": email.sender_email,
-            "sender_name": email.sender_name,
-            "recipients": json.loads(email.recipients) if email.recipients else [],
-            "date_received": email.date_received.isoformat() if email.date_received else None,
+            "thread_id": email.conversation_id or None,
+            "project_name": email.project.title if email.project else None,
+            "project_number": email.project.project_number if email.project else None,
             "subject": email.subject,
-            "body": email.body_text,
-            "attachments": [
-                {
-                    "filename": a.filename,
-                    "content_type": a.content_type,
-                    "extracted_text": a.extracted_text,
-                }
-                for a in email.attachments
-            ],
+            "date": email.date_received.isoformat() if email.date_received else None,
+            "from": email.sender_email,
+            "from_name": email.sender_name,
+            "to": to,
+            "cc": cc,
+            "bcc": bcc,
+            "body": clean_body_for_export(email.body_text) if email.body_text else None,
+            "attachments": [a.filename for a in email.attachments],
         })
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -213,8 +225,42 @@ def export_emails_json():
     return Response(
         json_bytes,
         mimetype="application/json",
-        headers={"Content-Disposition": f'attachment; filename="emails_{timestamp}.jsonb"'},
+        headers={"Content-Disposition": f'attachment; filename="emails_{timestamp}.json"'},
     )
+
+
+@app.route("/api/projects", methods=["GET"])
+def list_projects():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    projects = Project.query.order_by(Project.created_at.desc()).all()
+    return jsonify([{
+        "id": p.id,
+        "title": p.title,
+        "project_number": p.project_number,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    } for p in projects])
+
+
+@app.route("/api/projects", methods=["POST"])
+def create_project():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify({"error": "title required"}), 400
+    project = Project(
+        title=title,
+        project_number=(data.get("project_number") or "").strip() or None,
+    )
+    db.session.add(project)
+    db.session.commit()
+    return jsonify({
+        "id": project.id,
+        "title": project.title,
+        "project_number": project.project_number,
+    }), 201
 
 
 @app.route("/ingest")
@@ -255,6 +301,7 @@ def ingest_run():
     data = request.get_json(silent=True) or {}
     message_id = data.get("messageId", "")
     searched_email = data.get("searchedEmail", "") or None
+    project_id = data.get("projectId") or None
     if not message_id:
         return jsonify({"error": "messageId required"}), 400
     token = auth_helper.get_token_from_cache()
@@ -271,7 +318,7 @@ def ingest_run():
     if detail.get("hasAttachments"):
         attachments = graph_helper.get_message_attachments(access_token, message_id)
 
-    saved, skipped = save_email_to_db(detail, attachments, searched_email=searched_email)
+    saved, skipped = save_email_to_db(detail, attachments, searched_email=searched_email, project_id=project_id)
 
     if saved:
         try:
@@ -699,16 +746,15 @@ def teams():
         .order_by(TeamsChat.scraped_at.desc().nullslast())
         .all()
     )
-    scraped_chats = [
-        {
+    scraped_chats = []
+    for c in chats:
+        scraped_chats.append({
             "chat_id": c.chat_id,
             "display_name": c.display_name,
             "member_count": c.member_count,
             "scraped_at": c.scraped_at,
             "message_count": len(c.messages),
-        }
-        for c in chats
-    ]
+        })
     return render_template("teams.html", user=session["user"], scraped_chats=scraped_chats)
 
 
@@ -863,6 +909,7 @@ def api_teams_messages_export():
         mimetype="application/json",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
 
 
 @app.route("/api/auth/token-refresh", methods=["POST"])

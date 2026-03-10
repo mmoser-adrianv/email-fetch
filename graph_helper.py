@@ -529,6 +529,7 @@ def get_teams_messages_page(access_token, chat_id, next_link=None, top=50):
     messages = []
     for m in data.get("value", []):
         from_user = (m.get("from") or {}).get("user") or {}
+
         messages.append({
             "id": m.get("id", ""),
             "messageType": m.get("messageType", "message"),
@@ -603,3 +604,5 @@ def download_emails_zip_progress(access_token, result_info):
     except Exception as e:
         err_evt = json.dumps({"error": str(e)})
         yield f"data: {err_evt}\n\n"
+
+

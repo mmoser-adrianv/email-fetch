@@ -2,7 +2,25 @@
 {% block title %}Teams Chat Scraper{% endblock %}
 {% block styles %}
 <style>
-@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes spin {
+    from { transform: translateY(-50%) rotate(0deg); }
+    to   { transform: translateY(-50%) rotate(360deg); }
+}
+
+/* Search input */
+#chat-search {
+    width: 100%;
+    padding: 10px 36px 10px 14px;
+    font-size: 14px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-sizing: border-box;
+}
+#chat-search:focus {
+    outline: none;
+    border-color: #0078d4;
+    box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.2);
+}
 
 /* Indeterminate progress bar */
 #progress-bar {
@@ -64,6 +82,7 @@
     font-size: 0.95em;
     color: #333;
 }
+
 </style>
 {% endblock %}
 {% block content %}
@@ -132,10 +151,11 @@
             </td>
         </tr>
         {% else %}
-        <tr><td colspan="4" style="color:#888; text-align:center; padding:16px;">No chats scraped yet.</td></tr>
+        <tr><td colspan="5" style="color:#888; text-align:center; padding:16px;">No chats scraped yet.</td></tr>
         {% endfor %}
     </tbody>
 </table>
+
 {% endblock %}
 
 {% block scripts %}

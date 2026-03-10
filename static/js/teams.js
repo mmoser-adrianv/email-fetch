@@ -275,4 +275,5 @@
         div.textContent = text || "";
         return div.innerHTML;
     }
+
 })();

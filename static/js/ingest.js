@@ -12,12 +12,65 @@
     var searchSpinner = document.getElementById("search-spinner");
     var statusText = document.getElementById("status-text");
     var progressBar = document.getElementById("progress-bar");
+    var projectSelect = document.getElementById("project-select");
+    var projectTitleInput = document.getElementById("project-title");
+    var projectNumberInput = document.getElementById("project-number");
+    var downloadLink = document.getElementById("download-link");
+
+    function updateDownloadLink() {
+        var pid = projectSelect.value;
+        if (pid) {
+            var label = projectSelect.options[projectSelect.selectedIndex].textContent;
+            downloadLink.href = "/api/emails/export?project_id=" + encodeURIComponent(pid);
+            downloadLink.textContent = "Download Project Emails (JSON)";
+        } else {
+            downloadLink.href = "/api/emails/export";
+            downloadLink.textContent = "Download All Emails (JSON)";
+        }
+    }
 
     var selectedEmail = null;
     var debounceTimer = null;
     var stopped = false;
     var isRunning = false;
     var rowIndex = 0;
+    var currentProjectId = null;
+
+    // ── Projects ──────────────────────────────────────────────────────────────
+
+    function loadProjects() {
+        fetch("/api/projects")
+            .then(function (res) { return res.json(); })
+            .then(function (projects) {
+                projects.forEach(function (p) {
+                    var opt = document.createElement("option");
+                    opt.value = p.id;
+                    opt.textContent = p.title + (p.project_number ? " (" + p.project_number + ")" : "");
+                    opt.dataset.number = p.project_number || "";
+                    projectSelect.appendChild(opt);
+                });
+            })
+            .catch(function () {});
+    }
+
+    projectSelect.addEventListener("change", function () {
+        var selected = this.value;
+        if (selected) {
+            var opt = this.options[this.selectedIndex];
+            projectTitleInput.value = opt.textContent.replace(/ \(.*\)$/, "");
+            projectNumberInput.value = opt.dataset.number || "";
+            projectTitleInput.disabled = true;
+            projectNumberInput.disabled = true;
+        } else {
+            projectTitleInput.value = "";
+            projectNumberInput.value = "";
+            projectTitleInput.disabled = false;
+            projectNumberInput.disabled = false;
+        }
+        updateDownloadLink();
+    });
+
+    loadProjects();
 
     // ── Wake Lock ─────────────────────────────────────────────────────────────
 
@@ -132,6 +185,7 @@
         stopped = false;
         isRunning = true;
         rowIndex = 0;
+        currentProjectId = null;
         logBody.innerHTML = "";
         countProcessed.textContent = "0";
         countSaved.textContent = "0";
@@ -145,7 +199,41 @@
 
         acquireWakeLock();
         startTokenRefresh();
-        fetchPage(selectedEmail, null);
+
+        var existingProjectId = projectSelect.value;
+        if (existingProjectId) {
+            currentProjectId = parseInt(existingProjectId, 10);
+            fetchPage(selectedEmail, null);
+        } else {
+            var title = projectTitleInput.value.trim();
+            if (title) {
+                fetch("/api/projects", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ title: title, project_number: projectNumberInput.value.trim() }),
+                })
+                    .then(function (res) { return res.json(); })
+                    .then(function (data) {
+                        if (data.id) {
+                            currentProjectId = data.id;
+                            // Add new project to dropdown and select it
+                            var opt = document.createElement("option");
+                            opt.value = data.id;
+                            opt.textContent = data.title + (data.project_number ? " (" + data.project_number + ")" : "");
+                            opt.dataset.number = data.project_number || "";
+                            projectSelect.appendChild(opt);
+                            projectSelect.value = data.id;
+                            projectTitleInput.disabled = true;
+                            projectNumberInput.disabled = true;
+                            updateDownloadLink();
+                        }
+                        fetchPage(selectedEmail, null);
+                    })
+                    .catch(function () { fetchPage(selectedEmail, null); });
+            } else {
+                fetchPage(selectedEmail, null);
+            }
+        }
     });
 
     stopBtn.addEventListener("click", function () {
@@ -213,7 +301,7 @@
         fetch("/api/ingest/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ messageId: msg.id, searchedEmail: email }),
+            body: JSON.stringify({ messageId: msg.id, searchedEmail: email, projectId: currentProjectId }),
         })
             .then(function (res) {
                 if (res.status === 401) { window.location.href = "/login"; return null; }

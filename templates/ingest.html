@@ -2,7 +2,10 @@
 {% block title %}Email Ingest{% endblock %}
 {% block styles %}
 <style>
-@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes spin {
+    from { transform: translateY(-50%) rotate(0deg); }
+    to   { transform: translateY(-50%) rotate(360deg); }
+}
 
 /* Indeterminate progress bar */
 #progress-bar {
@@ -64,12 +67,40 @@
     font-size: 0.95em;
     color: #333;
 }
+
+/* Project section inputs */
+#project-select,
+#project-title,
+#project-number {
+    padding: 9px 12px;
+    font-size: 14px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: #fff;
+    color: #333;
+    height: 40px;
+    box-sizing: border-box;
+}
+#project-select:focus,
+#project-title:focus,
+#project-number:focus {
+    outline: none;
+    border-color: #0078d4;
+    box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.2);
+}
+#project-select:disabled,
+#project-title:disabled,
+#project-number:disabled {
+    background: #f5f5f5;
+    color: #888;
+    cursor: not-allowed;
+}
 </style>
 {% endblock %}
 {% block content %}
 <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
     <h1 style="margin:0;">Ingest Emails to Database</h1>
-    <a href="/api/emails/export" class="btn btn-secondary" download>Download All Emails (JSONB)</a>
+    <a id="download-link" href="/api/emails/export" class="btn btn-secondary" download="emails.json">Download All Emails (JSON)</a>
 </div>
 <div class="search-container">
     <div class="search-wrapper">
@@ -79,6 +110,17 @@
     </div>
     <button id="go-btn" class="btn btn-primary" disabled>Go</button>
     <button id="stop-btn" class="btn btn-stop" style="display:none;">Stop</button>
+</div>
+
+<div style="margin-bottom:16px;">
+    <label style="font-weight:500; display:block; margin-bottom:6px;">Project <span style="font-weight:400; color:#666;">(optional)</span></label>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <select id="project-select" style="min-width:180px;">
+            <option value="">-- New project --</option>
+        </select>
+        <input type="text" id="project-title" placeholder="Project Title" style="flex:1; min-width:160px;">
+        <input type="text" id="project-number" placeholder="Project Number" style="width:140px;">
+    </div>
 </div>
 
 <div id="progress-panel" style="display:none;">

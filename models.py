@@ -11,6 +11,12 @@ db = SQLAlchemy()
 
 
 _SKIP_TAGS = {"style", "script", "head"}
+# Block-level tags that act as line separators when stripped.
+_BLOCK_TAGS = {
+    "p", "div", "br", "li", "tr", "td", "th",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "blockquote", "hr", "pre",
+}
 
 
 class _HTMLStripper(HTMLParser):
@@ -20,12 +26,18 @@ class _HTMLStripper(HTMLParser):
         self._skip = False
 
     def handle_starttag(self, tag, attrs):
-        if tag.lower() in _SKIP_TAGS:
+        t = tag.lower()
+        if t in _SKIP_TAGS:
             self._skip = True
+        elif t in _BLOCK_TAGS:
+            self._parts.append('\n')
 
     def handle_endtag(self, tag):
-        if tag.lower() in _SKIP_TAGS:
+        t = tag.lower()
+        if t in _SKIP_TAGS:
             self._skip = False
+        elif t in _BLOCK_TAGS and t != 'br':
+            self._parts.append('\n')
 
     def handle_data(self, data):
         if not self._skip:
@@ -47,7 +59,7 @@ _PARA_BREAK_BEFORE = re.compile(
     r'(?<!\n)'
     r'('
     r'From:\s|Sent:\s|To:\s|Cc:\s|Subject:\s'
-    r'|Thanks\s*&\s*Regards|Warm\s+Regards|Best\s+Regards|Kind\s+Regards'
+    r'|Thanks\s*&\s*Regards|Warm\s+Regards|Best\s+Regards|Kind\s+Regards|Regards[,.]'
     r'|-----\s*Original'
     r')',
     re.IGNORECASE,
@@ -73,8 +85,8 @@ def clean_body_for_export(text: str) -> str:
     #    convert each run to a single newline.
     text = re.sub(r'\xa0+', '\n', text)
 
-    # 3. Remove literal backslash-n sequences (not real newlines).
-    text = text.replace('\\n', ' ')
+    # 3. Convert literal escaped newline sequences to real newlines.
+    text = text.replace('\\r\\n', '\n').replace('\\r', '\n').replace('\\n', '\n')
 
     # 4. Replace corrupted/replacement characters (e.g. mangled em-dashes).
     text = text.replace('\ufffd', '\u2013')  # U+FFFD → en-dash
@@ -119,6 +131,17 @@ def clean_body_for_export(text: str) -> str:
     return text.strip()
 
 
+class Project(db.Model):
+    __tablename__ = "projects"
+
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(255), nullable=False)
+    project_number = db.Column(db.String(64), nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    emails = db.relationship("Email", backref="project", lazy=True)
+
+
 class Email(db.Model):
     __tablename__ = "emails"
 
@@ -126,12 +149,17 @@ class Email(db.Model):
     message_id = db.Column(db.String(512), unique=True, nullable=False, index=True)
     sender_email = db.Column(db.String(255))
     sender_name = db.Column(db.String(255))
-    recipients = db.Column(db.Text)  # JSON-encoded list of addresses
+    recipients = db.Column(db.Text)  # JSON-encoded list of TO+CC addresses (legacy)
+    to_recipients = db.Column(db.Text)   # JSON-encoded list of TO addresses
+    cc_recipients = db.Column(db.Text)   # JSON-encoded list of CC addresses
+    bcc_recipients = db.Column(db.Text)  # JSON-encoded list of BCC addresses
+    conversation_id = db.Column(db.String(512), index=True)  # MS Graph conversationId
     date_received = db.Column(db.DateTime(timezone=True))
     subject = db.Column(db.Text)
     body = db.Column(db.Text)
     body_text = db.Column(db.Text)  # HTML-stripped plain text
     searched_email = db.Column(db.String(255), index=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("projects.id"), nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
     attachments = db.relationship(
@@ -245,6 +273,7 @@ class TeamsMessage(db.Model):
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
 
+
 def upsert_teams_chat(chat_data):
     """Create or update a TeamsChat row from a Graph API chat object.
 
@@ -304,7 +333,6 @@ def save_teams_messages_to_db(chat_id_str, messages_batch):
             skipped += 1
             continue
 
-        # Skip duplicates
         if TeamsMessage.query.filter_by(message_id=msg_id).first():
             skipped += 1
             continue
@@ -322,7 +350,7 @@ def save_teams_messages_to_db(chat_id_str, messages_batch):
             except ValueError:
                 pass
 
-        db.session.add(TeamsMessage(
+        msg_row = TeamsMessage(
             teams_chat_id=chat_row.id,
             message_id=msg_id,
             sender_name=msg.get("senderName") or "",
@@ -331,14 +359,16 @@ def save_teams_messages_to_db(chat_id_str, messages_batch):
             content_text=content_text,
             created_date_time=created_dt,
             message_type=msg.get("messageType", "message"),
-        ))
+        )
+        db.session.add(msg_row)
         saved += 1
 
     db.session.commit()
     return {"saved": saved, "skipped": skipped}
 
 
-def save_email_to_db(message_detail, attachment_list, searched_email=None):
+
+def save_email_to_db(message_detail, attachment_list, searched_email=None, project_id=None):
     """Persist one email + its attachments. Returns (saved: bool, skipped: bool).
 
     Uses the Graph API message id as the deduplication key.
@@ -355,10 +385,13 @@ def save_email_to_db(message_detail, attachment_list, searched_email=None):
     if existing:
         updated = False
         if existing.body_text is None and existing.body:
-            existing.body_text = strip_html_tags(existing.body)
+            existing.body_text = clean_body_for_export(strip_html_tags(existing.body))
             updated = True
         if existing.searched_email is None and searched_email:
             existing.searched_email = searched_email
+            updated = True
+        if existing.project_id is None and project_id is not None:
+            existing.project_id = project_id
             updated = True
         if updated:
             db.session.commit()
@@ -372,6 +405,10 @@ def save_email_to_db(message_detail, attachment_list, searched_email=None):
     cc_recipients = [
         r.get("emailAddress", {}).get("address", "")
         for r in message_detail.get("ccRecipients", [])
+    ]
+    bcc_recipients = [
+        r.get("emailAddress", {}).get("address", "")
+        for r in message_detail.get("bccRecipients", [])
     ]
     recipients_json = json.dumps(list(dict.fromkeys(to_recipients + cc_recipients)))
 
@@ -387,11 +424,10 @@ def save_email_to_db(message_detail, attachment_list, searched_email=None):
     body_info = message_detail.get("body", {})
     body_content = body_info.get("content", "")
     body_content_type = body_info.get("contentType", "html")
-    body_text_content = (
-        strip_html_tags(body_content)
-        if body_content_type.lower() == "html"
-        else body_content
-    )
+    if body_content_type.lower() == "html":
+        body_text_content = clean_body_for_export(strip_html_tags(body_content))
+    else:
+        body_text_content = clean_body_for_export(body_content or "")
 
     email_row = Email(
         message_id=graph_id,
@@ -400,11 +436,16 @@ def save_email_to_db(message_detail, attachment_list, searched_email=None):
         sender_name=message_detail.get("from", {})
             .get("emailAddress", {}).get("name", ""),
         recipients=recipients_json,
+        to_recipients=json.dumps(to_recipients),
+        cc_recipients=json.dumps(cc_recipients),
+        bcc_recipients=json.dumps(bcc_recipients),
+        conversation_id=message_detail.get("conversationId", ""),
         date_received=date_received,
         subject=message_detail.get("subject", "(no subject)"),
         body=body_content,
         body_text=body_text_content,
         searched_email=searched_email,
+        project_id=project_id,
     )
     db.session.add(email_row)
     db.session.flush()  # get email_row.id before committing
