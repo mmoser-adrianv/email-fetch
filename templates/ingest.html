@@ -2,11 +2,6 @@
 {% block title %}Email Ingest{% endblock %}
 {% block styles %}
 <style>
-@keyframes spin {
-    from { transform: translateY(-50%) rotate(0deg); }
-    to   { transform: translateY(-50%) rotate(360deg); }
-}
-
 /* Indeterminate progress bar */
 #progress-bar {
     height: 6px;
@@ -27,22 +22,28 @@
     100% { margin-left: 100%; }
 }
 
-/* Search spinner inside the input */
-#search-spinner {
-    display: none;
-    position: absolute;
-    right: 10px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 14px;
-    height: 14px;
-    border: 2px solid #ccc;
-    border-top-color: #555;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    pointer-events: none;
+/* Groups dropdown */
+#group-select {
+    padding: 9px 12px;
+    font-size: 14px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: #fff;
+    color: #333;
+    height: 40px;
+    box-sizing: border-box;
+    flex: 1;
 }
-.search-wrapper { position: relative; }
+#group-select:focus {
+    outline: none;
+    border-color: #0078d4;
+    box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.2);
+}
+#group-select:disabled {
+    background: #f5f5f5;
+    color: #888;
+    cursor: not-allowed;
+}
 
 /* Accent border on the counter box while running */
 #progress-panel.is-running .progress-summary {
@@ -103,11 +104,9 @@
     <a id="download-link" href="/api/emails/export" class="btn btn-secondary" download="emails.json">Download All Emails (JSON)</a>
 </div>
 <div class="search-container">
-    <div class="search-wrapper">
-        <input type="text" id="people-search" placeholder="Type a name or email..." autocomplete="off">
-        <span id="search-spinner"></span>
-        <div id="suggestions-dropdown" class="dropdown"></div>
-    </div>
+    <select id="group-select" disabled>
+        <option value="">Loading groups…</option>
+    </select>
     <button id="go-btn" class="btn btn-primary" disabled>Go</button>
     <button id="stop-btn" class="btn btn-stop" style="display:none;">Stop</button>
 </div>

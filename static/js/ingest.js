@@ -1,6 +1,5 @@
 (function () {
-    var searchInput = document.getElementById("people-search");
-    var dropdown = document.getElementById("suggestions-dropdown");
+    var groupSelect = document.getElementById("group-select");
     var goBtn = document.getElementById("go-btn");
     var stopBtn = document.getElementById("stop-btn");
     var progressPanel = document.getElementById("progress-panel");
@@ -9,7 +8,6 @@
     var countProcessed = document.getElementById("count-processed");
     var countSaved = document.getElementById("count-saved");
     var countSkipped = document.getElementById("count-skipped");
-    var searchSpinner = document.getElementById("search-spinner");
     var statusText = document.getElementById("status-text");
     var progressBar = document.getElementById("progress-bar");
     var projectSelect = document.getElementById("project-select");
@@ -20,7 +18,6 @@
     function updateDownloadLink() {
         var pid = projectSelect.value;
         if (pid) {
-            var label = projectSelect.options[projectSelect.selectedIndex].textContent;
             downloadLink.href = "/api/emails/export?project_id=" + encodeURIComponent(pid);
             downloadLink.textContent = "Download Project Emails (JSON)";
         } else {
@@ -30,11 +27,11 @@
     }
 
     var selectedEmail = null;
-    var debounceTimer = null;
     var stopped = false;
     var isRunning = false;
     var rowIndex = 0;
     var currentProjectId = null;
+    var currentGroupId = null;
 
     // ── Projects ──────────────────────────────────────────────────────────────
 
@@ -72,6 +69,54 @@
 
     loadProjects();
 
+    // ── Groups dropdown ───────────────────────────────────────────────────────
+
+    function loadGroups() {
+        fetch("/api/groups")
+            .then(function (res) {
+                if (res.status === 401) { window.location.href = "/login"; return null; }
+                return res.json();
+            })
+            .then(function (groups) {
+                if (!groups) return;
+                groupSelect.innerHTML = "";
+                if (groups.length === 0) {
+                    groupSelect.innerHTML = "<option value=''>No group mailboxes found</option>";
+                    return;
+                }
+                var placeholder = document.createElement("option");
+                placeholder.value = "";
+                placeholder.textContent = "Select a group mailbox…";
+                groupSelect.appendChild(placeholder);
+                groups.forEach(function (group) {
+                    var opt = document.createElement("option");
+                    opt.value = group.id;
+                    opt.textContent = group.displayName + " (" + group.mail + ")";
+                    opt.dataset.mail = group.mail;
+                    groupSelect.appendChild(opt);
+                });
+                groupSelect.disabled = false;
+            })
+            .catch(function () {
+                groupSelect.innerHTML = "<option value=''>Failed to load groups</option>";
+            });
+    }
+
+    groupSelect.addEventListener("change", function () {
+        var opt = this.options[this.selectedIndex];
+        if (this.value) {
+            selectedEmail = opt.dataset.mail;
+            currentGroupId = this.value;
+            goBtn.disabled = false;
+        } else {
+            selectedEmail = null;
+            currentGroupId = null;
+            goBtn.disabled = true;
+        }
+    });
+
+    loadGroups();
+
     // ── Wake Lock ─────────────────────────────────────────────────────────────
 
     var wakeLock = null;
@@ -104,7 +149,7 @@
                 .then(function (res) {
                     if (res.status === 401) { window.location.href = "/login"; }
                 });
-        }, 4 * 60 * 1000); // every 4 minutes
+        }, 4 * 60 * 1000);
     }
 
     function stopTokenRefresh() {
@@ -119,69 +164,11 @@
         if (progressPanel) progressPanel.classList.toggle("is-running", spinning);
     }
 
-    // ── Autocomplete ──────────────────────────────────────────────────────────
-
-    searchInput.addEventListener("input", function () {
-        var query = this.value.trim();
-        clearTimeout(debounceTimer);
-        selectedEmail = null;
-        goBtn.disabled = true;
-
-        if (query.length < 2) {
-            dropdown.style.display = "none";
-            if (searchSpinner) searchSpinner.style.display = "none";
-            return;
-        }
-
-        if (searchSpinner) searchSpinner.style.display = "block";
-
-        debounceTimer = setTimeout(function () {
-            fetch("/api/people/search?q=" + encodeURIComponent(query))
-                .then(function (res) {
-                    if (res.status === 401) { window.location.href = "/login"; return null; }
-                    return res.json();
-                })
-                .then(function (data) {
-                    if (searchSpinner) searchSpinner.style.display = "none";
-                    if (data) renderDropdown(data);
-                })
-                .catch(function () { if (searchSpinner) searchSpinner.style.display = "none"; });
-        }, 300);
-    });
-
-    function renderDropdown(people) {
-        dropdown.innerHTML = "";
-        if (!people || people.length === 0 || people.error) {
-            dropdown.style.display = "none";
-            return;
-        }
-        people.forEach(function (person) {
-            var item = document.createElement("div");
-            item.className = "suggestion-item";
-            item.textContent = person.displayName + " (" + person.email + ")";
-            item.addEventListener("click", function () {
-                selectedEmail = person.email;
-                searchInput.value = person.displayName + " (" + person.email + ")";
-                dropdown.style.display = "none";
-                goBtn.disabled = false;
-            });
-            dropdown.appendChild(item);
-        });
-        dropdown.style.display = "block";
-    }
-
-    document.addEventListener("click", function (e) {
-        if (!searchInput.contains(e.target) && !dropdown.contains(e.target)) {
-            dropdown.style.display = "none";
-        }
-    });
-
-    // ── Ingest loop ──────────────────────────────────────────────────────────
+    // ── Ingest loop ───────────────────────────────────────────────────────────
 
     goBtn.addEventListener("click", function () {
         if (!selectedEmail) return;
 
-        // Reset state
         stopped = false;
         isRunning = true;
         rowIndex = 0;
@@ -196,6 +183,7 @@
         stopBtn.style.display = "";
         progressPanel.style.display = "";
         logWrap.style.display = "";
+        groupSelect.disabled = true;
 
         acquireWakeLock();
         startTokenRefresh();
@@ -216,7 +204,6 @@
                     .then(function (data) {
                         if (data.id) {
                             currentProjectId = data.id;
-                            // Add new project to dropdown and select it
                             var opt = document.createElement("option");
                             opt.value = data.id;
                             opt.textContent = data.title + (data.project_number ? " (" + data.project_number + ")" : "");
@@ -247,7 +234,8 @@
             return;
         }
 
-        var url = "/api/ingest/page?email=" + encodeURIComponent(email);
+        var url = "/api/ingest/page?email=" + encodeURIComponent(email)
+            + "&groupId=" + encodeURIComponent(currentGroupId);
         if (nextLink) url += "&nextLink=" + encodeURIComponent(nextLink);
 
         setStatus("Fetching next batch…", true);
@@ -284,7 +272,6 @@
             return;
         }
         if (idx >= messages.length) {
-            // Batch done — fetch next page
             if (nextLink) {
                 fetchPage(email, nextLink);
             } else {
@@ -301,7 +288,7 @@
         fetch("/api/ingest/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ messageId: msg.id, searchedEmail: email, projectId: currentProjectId }),
+            body: JSON.stringify({ messageId: msg.id, searchedEmail: email, projectId: currentProjectId, groupId: currentGroupId }),
         })
             .then(function (res) {
                 if (res.status === 401) { window.location.href = "/login"; return null; }
@@ -362,7 +349,8 @@
         setStatus(message, false);
         stopBtn.style.display = "none";
         goBtn.style.display = "";
-        goBtn.disabled = false;
+        goBtn.disabled = !selectedEmail;
+        groupSelect.disabled = false;
     }
 
     function escapeHtml(text) {

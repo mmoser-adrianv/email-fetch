@@ -274,11 +274,23 @@ def ingest():
     return render_template("ingest.html", user=session["user"])
 
 
+@app.route("/api/groups")
+def api_groups():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    token = auth_helper.get_token_from_cache()
+    if not token:
+        return jsonify({"error": "login_required"}), 401
+    groups = graph_helper.get_user_groups(token["access_token"])
+    return jsonify(groups)
+
+
 @app.route("/api/ingest/page")
 def ingest_page():
     if not session.get("user"):
         return jsonify({"error": "login_required"}), 401
     email = request.args.get("email", "")
+    group_id = request.args.get("groupId", "") or None
     if not email:
         return jsonify({"error": "email parameter required"}), 400
     next_link = request.args.get("nextLink", "") or None
@@ -286,16 +298,14 @@ def ingest_page():
     if not token:
         return jsonify({"error": "login_required"}), 401
 
-    messages, next_link_out = graph_helper.get_messages_page(
-        token["access_token"], email, next_link=next_link
+    messages, next_link_out, group_id_out = graph_helper.get_messages_page(
+        token["access_token"], email, next_link=next_link, group_id=group_id
     )
 
     if messages is None:
-        if next_link_out == "group_not_supported":
-            return jsonify({"error": "Group mailboxes are not supported on the ingest page."}), 400
         return jsonify({"error": "Failed to fetch messages from Microsoft Graph."}), 502
 
-    return jsonify({"messages": messages, "nextLink": next_link_out})
+    return jsonify({"messages": messages, "nextLink": next_link_out, "groupId": group_id_out})
 
 
 @app.route("/api/ingest/run", methods=["POST"])
@@ -306,6 +316,7 @@ def ingest_run():
     message_id = data.get("messageId", "")
     searched_email = data.get("searchedEmail", "") or None
     project_id = data.get("projectId") or None
+    group_id = data.get("groupId") or None
     if not message_id:
         return jsonify({"error": "messageId required"}), 400
     token = auth_helper.get_token_from_cache()
@@ -314,13 +325,24 @@ def ingest_run():
 
     access_token = token["access_token"]
 
-    detail = graph_helper.get_message_detail(access_token, message_id)
-    if not detail:
-        return jsonify({"error": "Failed to fetch message detail"}), 502
-
-    attachments = []
-    if detail.get("hasAttachments"):
-        attachments = graph_helper.get_message_attachments(access_token, message_id)
+    # Group posts use composite IDs: "{thread_id}||{post_id}"
+    if group_id and "||" in message_id:
+        thread_id, post_id = message_id.split("||", 1)
+        detail = graph_helper.get_group_post_detail(access_token, group_id, thread_id, post_id)
+        if not detail:
+            return jsonify({"error": "Failed to fetch group post detail"}), 502
+        attachments = []
+        if detail.get("hasAttachments"):
+            attachments = graph_helper.get_group_post_attachments(
+                access_token, group_id, thread_id, post_id
+            )
+    else:
+        detail = graph_helper.get_message_detail(access_token, message_id, group_id=group_id)
+        if not detail:
+            return jsonify({"error": "Failed to fetch message detail"}), 502
+        attachments = []
+        if detail.get("hasAttachments"):
+            attachments = graph_helper.get_message_attachments(access_token, message_id, group_id=group_id)
 
     saved, skipped = save_email_to_db(detail, attachments, searched_email=searched_email, project_id=project_id)
 
@@ -934,8 +956,8 @@ def api_teams_messages_export():
         ],
     }
 
-    safe_name = (chat.display_name or chat.chat_id)[:40].replace(" ", "_")
-    filename = f"teams_{safe_name}.json"
+    safe_name = (chat.display_name or chat.chat_id)[:60].replace(" ", "_")
+    filename = f"teams_chat_{safe_name}.json"
 
     return Response(
         json.dumps(payload, indent=2, ensure_ascii=False),
@@ -1121,8 +1143,9 @@ def api_teams_channel_posts_export():
         ],
     }
 
-    safe_name = (channel.display_name or channel.channel_id)[:40].replace(" ", "_")
-    filename = f"teams_channel_{safe_name}.json"
+    safe_team = (team.display_name if team else "")[:40].replace(" ", "_")
+    safe_channel = (channel.display_name or channel.channel_id)[:40].replace(" ", "_")
+    filename = f"teams_channel_{safe_team}_{safe_channel}.json"
 
     return Response(
         json.dumps(payload, indent=2, ensure_ascii=False),

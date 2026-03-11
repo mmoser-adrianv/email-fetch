@@ -2,6 +2,7 @@ import json
 import re
 import tempfile
 import zipfile
+from urllib.parse import quote
 from io import BytesIO
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -57,6 +58,12 @@ def get_user_messages(access_token, user_email, top=20):
     """
     headers = {"Authorization": f"Bearer {access_token}"}
 
+    # Proactively check if this is a Microsoft 365 Group email so we read
+    # from the group's conversation threads rather than the user's inbox.
+    group_id, _name = resolve_group_id(access_token, user_email)
+    if group_id:
+        return _get_group_messages(headers, user_email, top)
+
     # --- Search the signed-in user's mailbox for emails to/cc the person ---
     # Note: toRecipients/ccRecipients are NOT filterable in Graph API.
     # Use $search with "to:" and "cc:" instead (KQL syntax).
@@ -79,23 +86,89 @@ def get_user_messages(access_token, user_email, top=20):
             "email": user_email,
         }
 
-    # Check if the error is the Group-shard error
+    # Fallback: if Graph still signals this is a group, try the group path.
     error_body = response.json()
-    error_code = (
-        error_body.get("error", {}).get("code", "")
-    )
-
+    error_code = error_body.get("error", {}).get("code", "")
     if error_code == "ErrorGroupIsUsedInNonGroupURI":
-        return _get_group_threads(headers, user_email, top)
+        return _get_group_messages(headers, user_email, top)
 
     return {"error": error_body}
 
 
-def _get_group_threads(headers, group_email, top=20):
-    """Look up a Microsoft 365 Group by its mail address and fetch its
-    conversation threads."""
+def _get_group_all_posts(headers, group_id, max_posts=200):
+    """Expand all conversation threads of a Microsoft 365 Group into their
+    individual posts (one per email delivery).
 
-    # Find the group by its email (proxyAddresses or mail)
+    Microsoft 365 Groups store email as conversation threads; each reply or
+    forwarded message is a separate post within a thread.  This function
+    walks every thread and returns one dict per post so callers see individual
+    emails rather than thread summaries.
+
+    Returns a list sorted by receivedDateTime descending.
+    Each dict has keys: id, subject, from, fromName, received, preview,
+    hasAttachments.  The id is a composite "{thread_id}||{post_id}" string.
+    """
+    all_posts = []
+
+    threads_url = (
+        f"{GRAPH_URL}/groups/{group_id}/threads"
+        f"?$select=id,topic,lastDeliveredDateTime"
+        f"&$top=50"
+        f"&$orderby=lastDeliveredDateTime desc"
+    )
+
+    while threads_url and len(all_posts) < max_posts:
+        resp = requests.get(threads_url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+
+        for thread in data.get("value", []):
+            if len(all_posts) >= max_posts:
+                break
+            thread_id = thread.get("id", "")
+            topic = thread.get("topic", "(no subject)")
+
+            posts_url = (
+                f"{GRAPH_URL}/groups/{group_id}/threads/{quote(thread_id, safe='')}/posts"
+                f"?$select=id,from,receivedDateTime,hasAttachments,body"
+                f"&$top=50"
+            )
+            while posts_url and len(all_posts) < max_posts:
+                posts_resp = requests.get(posts_url, headers=headers, timeout=30)
+                if posts_resp.status_code != 200:
+                    break
+                posts_data = posts_resp.json()
+                for post in posts_data.get("value", []):
+                    sender = (post.get("from") or {}).get("emailAddress") or {}
+                    body = post.get("body") or {}
+                    body_content = body.get("content", "")
+                    if body.get("contentType") == "html":
+                        preview = re.sub(r"<[^>]+>", " ", body_content)
+                        preview = " ".join(preview.split())[:200]
+                    else:
+                        preview = body_content[:200]
+                    all_posts.append({
+                        "id": f"{thread_id}||{post.get('id', '')}",
+                        "subject": topic,
+                        "from": sender.get("address", ""),
+                        "fromName": sender.get("name", ""),
+                        "received": post.get("receivedDateTime", ""),
+                        "preview": preview,
+                        "hasAttachments": post.get("hasAttachments", False),
+                    })
+                posts_url = posts_data.get("@odata.nextLink")
+
+        threads_url = data.get("@odata.nextLink")
+
+    all_posts.sort(key=lambda m: m.get("received", ""), reverse=True)
+    return all_posts
+
+
+def _get_group_messages(headers, group_email, top=20):
+    """Look up a Microsoft 365 Group by its mail address and return individual
+    posts (emails) by expanding all conversation threads."""
+
     filter_query = f"mail eq '{group_email}'"
     groups_url = (
         f"{GRAPH_URL}/groups"
@@ -112,32 +185,11 @@ def _get_group_threads(headers, group_email, top=20):
 
     group_id = groups[0]["id"]
 
-    # Fetch the group's conversation threads
-    threads_url = (
-        f"{GRAPH_URL}/groups/{group_id}/threads"
-        f"?$select=id,topic,lastDeliveredDateTime,preview"
-        f"&$top={top}"
-        f"&$orderby=lastDeliveredDateTime desc"
-    )
-    resp = requests.get(threads_url, headers=headers, timeout=30)
-    if resp.status_code != 200:
-        return {"error": resp.json()}
-
-    messages = []
-    for thread in resp.json().get("value", []):
-        messages.append({
-            "id": thread.get("id", ""),
-            "subject": thread.get("topic", "(no subject)"),
-            "from": groups[0].get("mail", ""),
-            "fromName": groups[0].get("displayName", ""),
-            "received": thread.get("lastDeliveredDateTime", ""),
-            "preview": thread.get("preview", ""),
-        })
-    # Enforce the limit (Graph may ignore $top on threads)
-    messages = messages[:top]
+    posts = _get_group_all_posts(headers, group_id, max_posts=max(top * 5, 100))
     return {
-        "messages": messages,
+        "messages": posts[:top],
         "source": "group",
+        "groupMessageType": "post",
         "email": group_email,
         "groupId": group_id,
     }
@@ -258,6 +310,116 @@ def _build_post_eml(headers, group_id, thread_id, post, subject,
     return msg
 
 
+def get_group_post_detail(access_token, group_id, thread_id, post_id):
+    """Fetch full detail of a single post within a group conversation thread.
+
+    Returns a message-like dict compatible with save_email_to_db, or None.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = (
+        f"{GRAPH_URL}/groups/{group_id}/threads/{quote(thread_id, safe='')}"
+        f"/posts/{quote(post_id, safe='')}"
+        f"?$select=id,from,receivedDateTime,body,hasAttachments"
+    )
+    resp = requests.get(url, headers=headers, timeout=30)
+    if resp.status_code != 200:
+        return None
+    post = resp.json()
+
+    # Fetch thread topic for subject
+    tresp = requests.get(
+        f"{GRAPH_URL}/groups/{group_id}/threads/{quote(thread_id, safe='')}?$select=topic",
+        headers=headers, timeout=10,
+    )
+    subject = tresp.json().get("topic", "(no subject)") if tresp.status_code == 200 else "(no subject)"
+
+    return {
+        "id": f"{thread_id}||{post_id}",
+        "internetMessageId": post.get("id", f"{thread_id}||{post_id}"),
+        "subject": subject,
+        "from": post.get("from") or {},
+        "toRecipients": post.get("toRecipients") or [],
+        "ccRecipients": post.get("ccRecipients") or [],
+        "receivedDateTime": post.get("receivedDateTime", ""),
+        "body": post.get("body") or {},
+        "hasAttachments": post.get("hasAttachments", False),
+    }
+
+
+def get_group_post_attachments(access_token, group_id, thread_id, post_id):
+    """Fetch attachments for a single post within a group conversation thread."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    attachments = []
+    url = (
+        f"{GRAPH_URL}/groups/{group_id}/threads/{quote(thread_id, safe='')}"
+        f"/posts/{quote(post_id, safe='')}/attachments"
+        f"?$select=id,name,contentType,size,isInline&$top=1"
+    )
+    while url:
+        resp = requests.get(url, headers=headers, timeout=60)
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        for att in data.get("value", []):
+            att_id = att.get("id")
+            if att_id:
+                value_resp = requests.get(
+                    f"{GRAPH_URL}/groups/{group_id}/threads/{quote(thread_id, safe='')}"
+                    f"/posts/{quote(post_id, safe='')}/attachments/{att_id}/$value",
+                    headers=headers,
+                    timeout=60,
+                )
+                if value_resp.status_code == 200:
+                    att["contentBytes"] = base64.b64encode(value_resp.content).decode()
+            attachments.append(att)
+        url = data.get("@odata.nextLink")
+    return attachments
+
+
+def get_group_post_mime(access_token, group_id, thread_id, post_id):
+    """Build an EML from a specific post within a group conversation thread."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = (
+        f"{GRAPH_URL}/groups/{group_id}/threads/{quote(thread_id, safe='')}"
+        f"/posts/{quote(post_id, safe='')}"
+        f"?$select=id,body,from,receivedDateTime,hasAttachments"
+    )
+    resp = requests.get(url, headers=headers, timeout=60)
+    if resp.status_code != 200:
+        return None
+    post = resp.json()
+
+    tresp = requests.get(
+        f"{GRAPH_URL}/groups/{group_id}/threads/{quote(thread_id, safe='')}?$select=topic",
+        headers=headers, timeout=10,
+    )
+    subject = tresp.json().get("topic", "(no subject)") if tresp.status_code == 200 else "(no subject)"
+
+    gresp = requests.get(
+        f"{GRAPH_URL}/groups/{group_id}?$select=mail",
+        headers=headers, timeout=10,
+    )
+    group_email = gresp.json().get("mail", "") if gresp.status_code == 200 else ""
+
+    msg = _build_post_eml(headers, group_id, thread_id, post, subject, group_email)
+    return msg.as_bytes()
+
+
+# Kept for backward compatibility (was used for mailbox-type group messages)
+def get_group_message_mime(access_token, group_id, message_id):
+    """Download the raw MIME content of an individual message from a group's
+    shared mailbox via GET /users/{group_id}/messages/{message_id}/$value.
+
+    Returns bytes or None on failure.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"{GRAPH_URL}/users/{group_id}/messages/{message_id}/$value"
+    resp = requests.get(url, headers=headers, timeout=60)
+    if resp.status_code != 200:
+        return None
+    return resp.content
+
+
 def get_group_thread_mime(access_token, group_id, thread_id):
     """Build an EML file from the first post in a group thread.
 
@@ -312,73 +474,88 @@ def get_group_thread_mime(access_token, group_id, thread_id):
     return msg.as_bytes()
 
 
-def get_messages_page(access_token, user_email, next_link=None, top=50):
+def get_messages_page(access_token, user_email, next_link=None, top=50, group_id=None):
     """Fetch one page of message summaries for archiving.
 
-    Returns (messages_list, next_link_or_None).
+    Returns (messages_list, next_link_or_None, group_id_or_None).
     messages_list contains dicts with keys: id, subject, hasAttachments.
+
+    If group_id is provided, fetches directly from that group's mailbox
+    without an extra resolution round-trip.
     """
     headers = {"Authorization": f"Bearer {access_token}"}
 
     if next_link:
-        url = next_link
-    else:
-        search_query = f'"to:{user_email} OR cc:{user_email}"'
-        url = (
-            f"{GRAPH_URL}/me/messages"
-            f"?$search={search_query}"
-            f"&$select=id,subject,hasAttachments"
-            f"&$top={top}"
-        )
+        # Continuation URL — only occurs for regular mailbox pagination.
+        response = requests.get(next_link, headers=headers, timeout=30)
+        if response.status_code != 200:
+            return None, None, None
+        data = response.json()
+        messages = [
+            {
+                "id": m.get("id", ""),
+                "subject": m.get("subject", "(no subject)"),
+                "hasAttachments": m.get("hasAttachments", False),
+            }
+            for m in data.get("value", [])
+        ]
+        return messages, data.get("@odata.nextLink"), None
 
-    response = requests.get(url, headers=headers, timeout=30)
-    if response.status_code != 200:
-        error_body = response.json()
-        error_code = error_body.get("error", {}).get("code", "")
-        if error_code == "ErrorGroupIsUsedInNonGroupURI":
-            return None, "group_not_supported"
-        return None, None
+    # If group_id is supplied directly, skip resolution and fetch group posts.
+    if not group_id:
+        group_id, _name = resolve_group_id(access_token, user_email)
 
-    data = response.json()
-    messages = [
-        {
-            "id": m.get("id", ""),
-            "subject": m.get("subject", "(no subject)"),
-            "hasAttachments": m.get("hasAttachments", False),
-        }
-        for m in data.get("value", [])
-    ]
-    next_link_out = data.get("@odata.nextLink")
-    return messages, next_link_out
+    if group_id:
+        posts = _get_group_all_posts(headers, group_id, max_posts=500)
+        summaries = [
+            {
+                "id": p["id"],
+                "subject": p["subject"],
+                "hasAttachments": p["hasAttachments"],
+            }
+            for p in posts
+        ]
+        return summaries, None, group_id
+
+    return None, None, None
 
 
-def get_message_detail(access_token, message_id):
-    """Fetch full details of a single message (body, recipients, etc.)."""
+def get_message_detail(access_token, message_id, group_id=None):
+    """Fetch full details of a single message (body, recipients, etc.).
+
+    When group_id is provided, reads from the group's shared mailbox via
+    GET /users/{group_id}/messages/{message_id} instead of /me/messages.
+    """
     headers = {"Authorization": f"Bearer {access_token}"}
     select = (
         "id,internetMessageId,subject,from,toRecipients,ccRecipients,"
         "receivedDateTime,body,hasAttachments"
     )
-    url = f"{GRAPH_URL}/me/messages/{message_id}?$select={select}"
+    mailbox = f"users/{group_id}" if group_id else "me"
+    url = f"{GRAPH_URL}/{mailbox}/messages/{message_id}?$select={select}"
     response = requests.get(url, headers=headers, timeout=30)
     if response.status_code != 200:
         return None
     return response.json()
 
 
-def get_message_attachments(access_token, message_id):
+def get_message_attachments(access_token, message_id, group_id=None):
     """Fetch attachment metadata and content for a single message.
 
     Paginates one attachment at a time ($top=1) to keep each JSON response
     small, since Graph API may ignore $select and include contentBytes.
     Downloads binary content via the /$value endpoint to avoid JSON parsing
     problems entirely — binary responses have no parse limit.
+
+    When group_id is provided, reads from the group's shared mailbox via
+    /users/{group_id}/messages/{message_id}/attachments.
     """
     headers = {"Authorization": f"Bearer {access_token}"}
     attachments = []
 
+    mailbox = f"users/{group_id}" if group_id else "me"
     url = (
-        f"{GRAPH_URL}/me/messages/{message_id}/attachments"
+        f"{GRAPH_URL}/{mailbox}/messages/{message_id}/attachments"
         "?$select=id,name,contentType,size,isInline&$top=1"
     )
 
@@ -402,7 +579,7 @@ def get_message_attachments(access_token, message_id):
                 # Fetch binary content via /$value — returns raw bytes, not
                 # base64 JSON, so there is no JSON size/truncation concern.
                 value_resp = requests.get(
-                    f"{GRAPH_URL}/me/messages/{message_id}/attachments/{att_id}/$value",
+                    f"{GRAPH_URL}/{mailbox}/messages/{message_id}/attachments/{att_id}/$value",
                     headers=headers,
                     timeout=60,
                 )
@@ -430,6 +607,7 @@ def download_emails_zip(access_token, result_info):
     email = result_info.get("email", "")
     group_id = result_info.get("groupId", "")
 
+    group_message_type = result_info.get("groupMessageType", "thread")
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for idx, msg in enumerate(messages, start=1):
@@ -439,6 +617,13 @@ def download_emails_zip(access_token, result_info):
             if source == "user":
                 mime_bytes = get_message_mime(
                     access_token, email, msg["id"]
+                )
+            elif group_message_type == "post" and "||" in msg["id"]:
+                tid, pid = msg["id"].split("||", 1)
+                mime_bytes = get_group_post_mime(access_token, group_id, tid, pid)
+            elif group_message_type == "mailbox":
+                mime_bytes = get_group_message_mime(
+                    access_token, group_id, msg["id"]
                 )
             else:
                 mime_bytes = get_group_thread_mime(
@@ -645,6 +830,32 @@ def resolve_group_id(access_token, group_email):
     return groups[0]["id"], groups[0].get("displayName", "")
 
 
+def get_user_groups(access_token):
+    """Return all Microsoft 365 Groups (Unified groups with mailboxes) the user is a member of.
+
+    Returns a list of {id, displayName, mail} dicts, sorted by displayName.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = (
+        f"{GRAPH_URL}/me/memberOf/microsoft.graph.group"
+        f"?$filter=groupTypes/any(c:c eq 'Unified')"
+        f"&$select=id,displayName,mail"
+        f"&$top=100"
+    )
+    groups = []
+    while url:
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        for g in data.get("value", []):
+            if g.get("mail"):
+                groups.append({"id": g["id"], "displayName": g.get("displayName", ""), "mail": g["mail"]})
+        url = data.get("@odata.nextLink")
+    groups.sort(key=lambda g: g["displayName"].lower())
+    return groups
+
+
 def get_group_calendar_events_page(access_token, group_id, next_link=None, top=50):
     """Fetch one page of calendar events from a Microsoft 365 Group.
 
@@ -720,6 +931,7 @@ def download_emails_zip_progress(access_token, result_info):
     source = result_info.get("source", "user")
     email = result_info.get("email", "")
     group_id = result_info.get("groupId", "")
+    group_message_type = result_info.get("groupMessageType", "thread")
     total = len(messages)
 
     try:
@@ -744,6 +956,13 @@ def download_emails_zip_progress(access_token, result_info):
                 if source == "user":
                     mime_bytes = get_message_mime(
                         access_token, email, msg["id"]
+                    )
+                elif group_message_type == "post" and "||" in msg["id"]:
+                    tid, pid = msg["id"].split("||", 1)
+                    mime_bytes = get_group_post_mime(access_token, group_id, tid, pid)
+                elif group_message_type == "mailbox":
+                    mime_bytes = get_group_message_mime(
+                        access_token, group_id, msg["id"]
                     )
                 else:
                     mime_bytes = get_group_thread_mime(
