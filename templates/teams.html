@@ -8,7 +8,7 @@
 }
 
 /* Search input */
-#chat-search {
+#chat-search, #team-search {
     width: 100%;
     padding: 10px 36px 10px 14px;
     font-size: 14px;
@@ -16,14 +16,14 @@
     border-radius: 4px;
     box-sizing: border-box;
 }
-#chat-search:focus {
+#chat-search:focus, #team-search:focus {
     outline: none;
     border-color: #0078d4;
     box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.2);
 }
 
 /* Indeterminate progress bar */
-#progress-bar {
+.progress-bar-track {
     height: 6px;
     background: #e0e0e0;
     border-radius: 3px;
@@ -43,7 +43,7 @@
 }
 
 /* Search spinner inside the input */
-#search-spinner {
+.search-spinner {
     display: none;
     position: absolute;
     right: 10px;
@@ -60,13 +60,13 @@
 .search-wrapper { position: relative; }
 
 /* Accent border on the counter box while running */
-#progress-panel.is-running .progress-summary {
+.progress-panel.is-running .progress-summary {
     border-left: 3px solid #0078d4;
     padding-left: 13px;
 }
 
 /* Stop button pulse while running */
-#stop-btn {
+.stop-btn-animated {
     animation: stop-pulse 2s ease-in-out infinite;
 }
 @keyframes stop-pulse {
@@ -75,12 +75,26 @@
 }
 
 /* Status message row */
-#status-msg {
+.status-msg-row {
     display: flex;
     align-items: center;
     font-weight: 500;
     font-size: 0.95em;
     color: #333;
+}
+
+/* Channel select */
+#channel-select {
+    padding: 10px 12px;
+    font-size: 14px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    min-width: 200px;
+}
+#channel-select:focus {
+    outline: none;
+    border-color: #0078d4;
+    box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.2);
 }
 
 </style>
@@ -91,21 +105,21 @@
 <div class="search-container">
     <div class="search-wrapper">
         <input type="text" id="chat-search" placeholder="Type a group chat name..." autocomplete="off">
-        <span id="search-spinner"></span>
+        <span id="search-spinner" class="search-spinner"></span>
         <div id="suggestions-dropdown" class="dropdown"></div>
     </div>
     <button id="scrape-btn" class="btn btn-primary" disabled>Scrape</button>
-    <button id="stop-btn" class="btn btn-stop" style="display:none;">Stop</button>
+    <button id="stop-btn" class="btn btn-stop stop-btn-animated" style="display:none;">Stop</button>
 </div>
 
-<div id="progress-panel" style="display:none;">
+<div id="progress-panel" class="progress-panel" style="display:none;">
     <div class="progress-summary">
         Processed: <strong id="count-processed">0</strong> &nbsp;&nbsp;
         Saved: <strong id="count-saved">0</strong> &nbsp;&nbsp;
         Skipped (duplicate/system): <strong id="count-skipped">0</strong>
     </div>
-    <div id="progress-bar" style="display:none;"><div class="progress-bar-inner"></div></div>
-    <div id="status-msg" class="status-msg">
+    <div id="progress-bar" class="progress-bar-track" style="display:none;"><div class="progress-bar-inner"></div></div>
+    <div id="status-msg" class="status-msg-row">
         <span id="status-text"></span>
     </div>
 </div>
@@ -156,8 +170,90 @@
     </tbody>
 </table>
 
+<hr style="margin: 40px 0;">
+
+<!-- ── Teams & Channels Section ─────────────────────────────────────────── -->
+<h1 style="margin-bottom:16px;">Teams &amp; Channels Scraper</h1>
+
+<div class="search-container">
+    <div class="search-wrapper">
+        <input type="text" id="team-search" placeholder="Type a team name..." autocomplete="off">
+        <span id="team-search-spinner" class="search-spinner"></span>
+        <div id="team-suggestions-dropdown" class="dropdown"></div>
+    </div>
+    <select id="channel-select" disabled>
+        <option value="">— select a channel —</option>
+    </select>
+    <button id="channel-scrape-btn" class="btn btn-primary" disabled>Scrape</button>
+    <button id="channel-stop-btn" class="btn btn-stop stop-btn-animated" style="display:none;">Stop</button>
+</div>
+
+<div id="channel-progress-panel" class="progress-panel" style="display:none;">
+    <div class="progress-summary">
+        Processed: <strong id="ch-count-processed">0</strong> &nbsp;&nbsp;
+        Saved: <strong id="ch-count-saved">0</strong> &nbsp;&nbsp;
+        Skipped (duplicate/system): <strong id="ch-count-skipped">0</strong>
+    </div>
+    <div id="channel-progress-bar" class="progress-bar-track" style="display:none;"><div class="progress-bar-inner"></div></div>
+    <div id="channel-status-msg" class="status-msg-row">
+        <span id="channel-status-text"></span>
+    </div>
+</div>
+
+<div id="channel-scrape-log-wrap" style="display:none;">
+    <table id="channel-scrape-log">
+        <thead>
+            <tr>
+                <th>Batch #</th>
+                <th>Date Range</th>
+                <th>Posts</th>
+                <th>Result</th>
+            </tr>
+        </thead>
+        <tbody id="channel-scrape-log-body"></tbody>
+    </table>
+</div>
+
+<hr style="margin: 32px 0;">
+
+<h2 style="margin-bottom:12px;">Previously Scraped Channels</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Team</th>
+            <th>Channel</th>
+            <th>Posts</th>
+            <th>Last Scraped</th>
+            <th>Download</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% set ns = namespace(found=false) %}
+        {% for team in scraped_teams %}
+            {% for ch in team.channels %}
+            {% set ns.found = true %}
+            <tr>
+                <td>{{ team.display_name or "(unnamed team)" }}</td>
+                <td>{{ ch.display_name or "(unnamed channel)" }}</td>
+                <td>{{ ch.post_count }}</td>
+                <td>{{ ch.scraped_at.strftime('%Y-%m-%d %H:%M') if ch.scraped_at else "—" }}</td>
+                <td>
+                    {% if ch.post_count > 0 %}
+                    <a href="{{ url_for('api_teams_channel_posts_export', channelId=ch.channel_id) }}" class="btn btn-secondary" download>JSON</a>
+                    {% else %}—{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        {% endfor %}
+        {% if not ns.found %}
+        <tr><td colspan="5" style="color:#888; text-align:center; padding:16px;">No channels scraped yet.</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+
 {% endblock %}
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/teams.js') }}"></script>
+<script src="{{ url_for('static', filename='js/teams_channels.js') }}"></script>
 {% endblock %}

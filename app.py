@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from flask import (
     Flask, redirect, render_template, request,
@@ -16,6 +17,9 @@ from models import (
     db, save_email_to_db, ChatSession, ChatMessage, Email, Project,
     TeamsChat, TeamsMessage,
     upsert_teams_chat, save_teams_messages_to_db, clean_body_for_export,
+    TeamsTeam, TeamsChannel, TeamsChannelPost,
+    upsert_teams_team, upsert_teams_channel, save_teams_channel_posts_to_db,
+    CalendarEvent, CalendarEventAttendee, save_calendar_event_to_db,
 )
 
 app = Flask(__name__)
@@ -755,7 +759,36 @@ def teams():
             "scraped_at": c.scraped_at,
             "message_count": len(c.messages),
         })
-    return render_template("teams.html", user=session["user"], scraped_chats=scraped_chats)
+
+    teams_list = (
+        TeamsTeam.query
+        .order_by(TeamsTeam.scraped_at.desc().nullslast())
+        .all()
+    )
+    scraped_teams = []
+    for t in teams_list:
+        channels = TeamsChannel.query.filter_by(teams_team_id=t.id).all()
+        channel_info = []
+        for ch in channels:
+            post_count = TeamsChannelPost.query.filter_by(teams_channel_id=ch.id).count()
+            channel_info.append({
+                "channel_id": ch.channel_id,
+                "display_name": ch.display_name,
+                "scraped_at": ch.scraped_at,
+                "post_count": post_count,
+            })
+        scraped_teams.append({
+            "team_id": t.team_id,
+            "display_name": t.display_name,
+            "channels": channel_info,
+        })
+
+    return render_template(
+        "teams.html",
+        user=session["user"],
+        scraped_chats=scraped_chats,
+        scraped_teams=scraped_teams,
+    )
 
 
 @app.route("/api/teams/chats/search")
@@ -910,6 +943,352 @@ def api_teams_messages_export():
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
+
+
+# ── Teams Channel Scraper ─────────────────────────────────────────────────────
+
+@app.route("/api/teams/teams/search")
+def api_teams_teams_search():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    token = auth_helper.get_token_from_cache()
+    if not token or "access_token" not in token:
+        return jsonify({"error": "login_required"}), 401
+
+    q = request.args.get("q", "").strip()
+    if len(q) < 2:
+        return jsonify([])
+
+    result = graph_helper.search_teams_by_name(token["access_token"], q)
+    if isinstance(result, dict) and "error" in result:
+        return jsonify(result), 502
+    return jsonify(result)
+
+
+@app.route("/api/teams/teams/channels")
+def api_teams_team_channels():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    token = auth_helper.get_token_from_cache()
+    if not token or "access_token" not in token:
+        return jsonify({"error": "login_required"}), 401
+
+    team_id = request.args.get("teamId", "").strip()
+    if not team_id:
+        return jsonify({"error": "teamId required"}), 400
+
+    result = graph_helper.get_team_channels(token["access_token"], team_id)
+    if isinstance(result, dict) and "error" in result:
+        return jsonify(result), 502
+    return jsonify(result)
+
+
+@app.route("/api/teams/channel/messages/page")
+def api_teams_channel_messages_page():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    token = auth_helper.get_token_from_cache()
+    if not token or "access_token" not in token:
+        return jsonify({"error": "login_required"}), 401
+
+    team_id = request.args.get("teamId", "").strip()
+    channel_id = request.args.get("channelId", "").strip()
+    if not team_id or not channel_id:
+        return jsonify({"error": "teamId and channelId required"}), 400
+
+    next_link = request.args.get("nextLink") or None
+    messages, next_link_out = graph_helper.get_channel_messages_page(
+        token["access_token"], team_id, channel_id, next_link=next_link
+    )
+    if messages is None:
+        err_detail = next_link_out or {}
+        return jsonify({"error": "Failed to fetch messages from Graph API", "detail": err_detail}), 502
+
+    return jsonify({"messages": messages, "nextLink": next_link_out})
+
+
+@app.route("/api/teams/channel/posts/save", methods=["POST"])
+def api_teams_channel_posts_save():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+
+    data = request.get_json(force=True) or {}
+    team_id = data.get("teamId", "").strip()
+    channel_id = data.get("channelId", "").strip()
+    team_name = data.get("teamName", "")
+    channel_name = data.get("channelName", "")
+    posts = data.get("posts", [])
+
+    if not team_id or not channel_id:
+        return jsonify({"error": "teamId and channelId required"}), 400
+
+    import chroma_helper
+    team_row = upsert_teams_team({"id": team_id, "displayName": team_name})
+    channel_row = upsert_teams_channel(team_row.id, {"id": channel_id, "displayName": channel_name})
+
+    result = save_teams_channel_posts_to_db(channel_row.id, posts)
+
+    for post_row in result.get("rows", []):
+        try:
+            chroma_helper.embed_and_upsert_teams_post(post_row, team_name, channel_name)
+        except Exception as e:
+            app.logger.warning("ChromaDB embed failed for post %s: %s", post_row.id, e)
+
+    return jsonify({"saved": result["saved"], "skipped": result["skipped"]})
+
+
+@app.route("/api/teams/channel/complete", methods=["POST"])
+def api_teams_channel_complete():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+
+    from datetime import datetime
+    channel_id = request.args.get("channelId", "").strip()
+    if not channel_id:
+        return jsonify({"error": "channelId required"}), 400
+
+    channel_row = TeamsChannel.query.filter_by(channel_id=channel_id).first()
+    if channel_row:
+        channel_row.scraped_at = datetime.utcnow()
+        db.session.commit()
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/teams/channels/list")
+def api_teams_channels_list():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+
+    team_id = request.args.get("teamId", "").strip()
+    if not team_id:
+        return jsonify({"error": "teamId required"}), 400
+
+    team_row = TeamsTeam.query.filter_by(team_id=team_id).first()
+    if not team_row:
+        return jsonify([])
+
+    channels = TeamsChannel.query.filter_by(teams_team_id=team_row.id).all()
+    return jsonify([
+        {
+            "channel_id": ch.channel_id,
+            "display_name": ch.display_name,
+            "scraped_at": ch.scraped_at.isoformat() if ch.scraped_at else None,
+            "post_count": TeamsChannelPost.query.filter_by(teams_channel_id=ch.id).count(),
+        }
+        for ch in channels
+    ])
+
+
+@app.route("/api/teams/channel/posts/export")
+def api_teams_channel_posts_export():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+
+    channel_id = request.args.get("channelId", "").strip()
+    if not channel_id:
+        return jsonify({"error": "channelId required"}), 400
+
+    channel = TeamsChannel.query.filter_by(channel_id=channel_id).first()
+    if not channel:
+        return jsonify({"error": "Channel not found"}), 404
+
+    team = TeamsTeam.query.get(channel.teams_team_id)
+    posts = (
+        TeamsChannelPost.query
+        .filter_by(teams_channel_id=channel.id)
+        .order_by(TeamsChannelPost.created_date_time.asc())
+        .all()
+    )
+
+    payload = {
+        "team_name": team.display_name if team else "",
+        "channel_id": channel.channel_id,
+        "channel_name": channel.display_name,
+        "scraped_at": channel.scraped_at.isoformat() if channel.scraped_at else None,
+        "posts": [
+            {
+                "message_id": p.message_id,
+                "sender_name": p.sender_name,
+                "sender_email": p.sender_email,
+                "subject": p.subject,
+                "created_date_time": p.created_date_time.isoformat() if p.created_date_time else None,
+                "importance": p.importance,
+                "web_url": p.web_url,
+                "content": p.content_text,
+            }
+            for p in posts
+        ],
+    }
+
+    safe_name = (channel.display_name or channel.channel_id)[:40].replace(" ", "_")
+    filename = f"teams_channel_{safe_name}.json"
+
+    return Response(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        mimetype="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Calendar Scraper ──────────────────────────────────────────────────────────
+
+@app.route("/calendar")
+def calendar():
+    if not session.get("user"):
+        return redirect(url_for("login"))
+
+    from sqlalchemy import func
+    rows = (
+        db.session.query(
+            CalendarEvent.searched_email,
+            func.count(CalendarEvent.id).label("event_count"),
+            func.min(CalendarEvent.start_datetime).label("earliest"),
+            func.max(CalendarEvent.start_datetime).label("latest"),
+            func.max(CalendarEvent.created_at).label("last_scraped"),
+        )
+        .filter(CalendarEvent.searched_email.isnot(None))
+        .group_by(CalendarEvent.searched_email)
+        .order_by(func.max(CalendarEvent.created_at).desc())
+        .all()
+    )
+    scraped_emails = [
+        {
+            "email": r.searched_email,
+            "event_count": r.event_count,
+            "earliest": r.earliest.strftime("%Y-%m-%d") if r.earliest else None,
+            "latest": r.latest.strftime("%Y-%m-%d") if r.latest else None,
+            "last_scraped": r.last_scraped,
+        }
+        for r in rows
+    ]
+    return render_template("calendar.html", user=session["user"], scraped_emails=scraped_emails)
+
+
+@app.route("/api/calendar/resolve")
+def api_calendar_resolve():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    email = request.args.get("email", "").strip()
+    if not email:
+        return jsonify({"error": "email parameter required"}), 400
+    token = auth_helper.get_token_from_cache()
+    if not token:
+        return jsonify({"error": "login_required"}), 401
+
+    group_id, display_name = graph_helper.resolve_group_id(token["access_token"], email)
+    if not group_id:
+        return jsonify({"error": f"No Microsoft 365 group found for '{email}'"}), 404
+    return jsonify({"groupId": group_id, "displayName": display_name})
+
+
+@app.route("/api/calendar/events/page")
+def api_calendar_events_page():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    token = auth_helper.get_token_from_cache()
+    if not token:
+        return jsonify({"error": "login_required"}), 401
+
+    group_id = request.args.get("groupId", "").strip()
+    if not group_id:
+        return jsonify({"error": "groupId required"}), 400
+
+    next_link = request.args.get("nextLink") or None
+    events, next_link_out = graph_helper.get_group_calendar_events_page(
+        token["access_token"], group_id, next_link=next_link
+    )
+    if events is None:
+        return jsonify({"error": "Failed to fetch events from Graph API", "detail": next_link_out}), 502
+
+    return jsonify({"events": events, "nextLink": next_link_out})
+
+
+@app.route("/api/calendar/events/run", methods=["POST"])
+def api_calendar_events_run():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+    token = auth_helper.get_token_from_cache()
+    if not token:
+        return jsonify({"error": "login_required"}), 401
+
+    data = request.get_json(silent=True) or {}
+    group_id = data.get("groupId", "").strip()
+    event_id = data.get("eventId", "").strip()
+    searched_email = data.get("searchedEmail", "") or None
+
+    if not group_id or not event_id:
+        return jsonify({"error": "groupId and eventId required"}), 400
+
+    detail = graph_helper.get_calendar_event_detail(token["access_token"], group_id, event_id)
+    if not detail:
+        return jsonify({"error": "Failed to fetch event detail"}), 502
+
+    saved, skipped = save_calendar_event_to_db(detail, searched_email=searched_email)
+    start_info = detail.get("start") or {}
+    return jsonify({
+        "saved": saved,
+        "skipped": skipped,
+        "subject": detail.get("subject", "(no subject)"),
+        "start": start_info.get("dateTime", ""),
+    })
+
+
+@app.route("/api/calendar/events/export")
+def api_calendar_events_export():
+    if not session.get("user"):
+        return jsonify({"error": "login_required"}), 401
+
+    email = request.args.get("email", "").strip()
+    if not email:
+        return jsonify({"error": "email parameter required"}), 400
+
+    events = (
+        CalendarEvent.query
+        .options(db.joinedload(CalendarEvent.attendees))
+        .filter_by(searched_email=email)
+        .order_by(CalendarEvent.start_datetime.desc())
+        .all()
+    )
+
+    data = []
+    for ev in events:
+        data.append({
+            "event_id": ev.event_id,
+            "subject": ev.subject,
+            "start": ev.start_datetime.isoformat() if ev.start_datetime else None,
+            "end": ev.end_datetime.isoformat() if ev.end_datetime else None,
+            "timezone": ev.timezone,
+            "location": ev.location,
+            "organizer_email": ev.organizer_email,
+            "organizer_name": ev.organizer_name,
+            "is_online_meeting": ev.is_online_meeting,
+            "online_meeting_url": ev.online_meeting_url,
+            "join_url": ev.join_url,
+            "web_link": ev.web_link,
+            "body": ev.body_text,
+            "attendees": [
+                {
+                    "email": a.email,
+                    "name": a.name,
+                    "type": a.attendee_type,
+                    "response": a.response_status,
+                }
+                for a in ev.attendees
+            ],
+            "searched_email": ev.searched_email,
+        })
+
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_email = re.sub(r'[^\w@._-]', '_', email)[:50]
+    filename = f"calendar_{safe_email}_{timestamp}.json"
+
+    return Response(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        mimetype="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.route("/api/auth/token-refresh", methods=["POST"])

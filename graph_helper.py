@@ -543,6 +543,168 @@ def get_teams_messages_page(access_token, chat_id, next_link=None, top=50):
     return messages, next_link_out
 
 
+def get_joined_teams(access_token):
+    """Return all Teams the signed-in user is a member of.
+
+    Returns a list of dicts with keys: id, displayName, description.
+    Returns {"error": ...} on failure.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"{GRAPH_URL}/me/joinedTeams?$select=id,displayName,description"
+    response = requests.get(url, headers=headers, timeout=15)
+    if response.status_code == 200:
+        return response.json().get("value", [])
+    return {"error": response.json()}
+
+
+def get_team_channels(access_token, team_id):
+    """Return all channels in a Team.
+
+    Returns a list of dicts with keys: id, displayName, description.
+    Returns {"error": ...} on failure.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"{GRAPH_URL}/teams/{team_id}/channels?$select=id,displayName,description"
+    response = requests.get(url, headers=headers, timeout=15)
+    if response.status_code == 200:
+        return response.json().get("value", [])
+    return {"error": response.json()}
+
+
+def get_channel_messages_page(access_token, team_id, channel_id, next_link=None, top=50):
+    """Fetch one page of top-level posts from a Teams channel.
+
+    Returns (messages_list, next_link_or_None).
+    Each message dict has: id, messageType, createdDateTime,
+    senderName, senderEmail, contentHtml, subject, importance, webUrl.
+
+    Note: senderEmail is empty string — not available in channelMessage resource.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    if next_link:
+        url = next_link
+    else:
+        url = f"{GRAPH_URL}/teams/{team_id}/channels/{channel_id}/messages?$top={top}"
+
+    response = requests.get(url, headers=headers, timeout=30)
+    if response.status_code != 200:
+        return None, {"graph_status": response.status_code, "detail": response.json()}
+
+    data = response.json()
+    messages = []
+    for m in data.get("value", []):
+        from_user = (m.get("from") or {}).get("user") or {}
+
+        messages.append({
+            "id": m.get("id", ""),
+            "messageType": m.get("messageType", "message"),
+            "createdDateTime": m.get("createdDateTime", ""),
+            "senderName": from_user.get("displayName", ""),
+            "senderEmail": "",  # not available in channelMessage resource
+            "contentHtml": (m.get("body") or {}).get("content", ""),
+            "subject": m.get("subject") or "",
+            "importance": m.get("importance") or "normal",
+            "webUrl": m.get("webUrl") or "",
+        })
+
+    next_link_out = data.get("@odata.nextLink")
+    return messages, next_link_out
+
+
+def search_teams_by_name(access_token, query):
+    """Return joined Teams whose displayName contains the query string (case-insensitive).
+
+    Returns a filtered list of {id, displayName, description} dicts.
+    Returns {"error": ...} on failure.
+    """
+    teams = get_joined_teams(access_token)
+    if isinstance(teams, dict) and "error" in teams:
+        return teams
+    q_lower = query.lower()
+    return [t for t in teams if q_lower in (t.get("displayName") or "").lower()]
+
+
+def resolve_group_id(access_token, group_email):
+    """Look up a Microsoft 365 Group by its email address.
+
+    Returns (group_id, display_name) or (None, None) if not found.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = (
+        f"{GRAPH_URL}/groups"
+        f"?$filter=mail eq '{group_email}'"
+        f"&$select=id,displayName,mail"
+    )
+    resp = requests.get(url, headers=headers, timeout=10)
+    if resp.status_code != 200:
+        return None, None
+    groups = resp.json().get("value", [])
+    if not groups:
+        return None, None
+    return groups[0]["id"], groups[0].get("displayName", "")
+
+
+def get_group_calendar_events_page(access_token, group_id, next_link=None, top=50):
+    """Fetch one page of calendar events from a Microsoft 365 Group.
+
+    Returns (events_list, next_link_or_None).
+    Each event dict has: id, subject, start, end, organizer, isOnlineMeeting, bodyPreview, location.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    if next_link:
+        url = next_link
+    else:
+        select = "id,subject,start,end,organizer,isOnlineMeeting,bodyPreview,location"
+        url = (
+            f"{GRAPH_URL}/groups/{group_id}/events"
+            f"?$select={select}"
+            f"&$orderby=start/dateTime desc"
+            f"&$top={top}"
+        )
+
+    resp = requests.get(url, headers=headers, timeout=30)
+    if resp.status_code != 200:
+        return None, {"graph_status": resp.status_code, "detail": resp.json()}
+
+    data = resp.json()
+    events = []
+    for e in data.get("value", []):
+        org = (e.get("organizer") or {}).get("emailAddress") or {}
+        loc = (e.get("location") or {}).get("displayName", "")
+        events.append({
+            "id": e.get("id", ""),
+            "subject": e.get("subject", "(no subject)"),
+            "start": e.get("start", {}),
+            "end": e.get("end", {}),
+            "organizer": org.get("name", "") or org.get("address", ""),
+            "isOnlineMeeting": e.get("isOnlineMeeting", False),
+            "bodyPreview": e.get("bodyPreview", ""),
+            "location": loc,
+        })
+
+    next_link_out = data.get("@odata.nextLink")
+    return events, next_link_out
+
+
+def get_calendar_event_detail(access_token, group_id, event_id):
+    """Fetch full details of a single group calendar event.
+
+    Returns the full event dict or None on failure.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    select = (
+        "id,subject,start,end,location,body,organizer,attendees,"
+        "isOnlineMeeting,onlineMeetingUrl,onlineMeeting,webLink"
+    )
+    url = f"{GRAPH_URL}/groups/{group_id}/events/{event_id}?$select={select}"
+    resp = requests.get(url, headers=headers, timeout=30)
+    if resp.status_code != 200:
+        return None
+    return resp.json()
+
+
 def download_emails_zip_progress(access_token, result_info):
     """Generator that yields SSE events while building the ZIP.
 

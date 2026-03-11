@@ -367,6 +367,282 @@ def save_teams_messages_to_db(chat_id_str, messages_batch):
     return {"saved": saved, "skipped": skipped}
 
 
+# ── Teams Teams / Channels / Posts ────────────────────────────────────────────
+
+class TeamsTeam(db.Model):
+    __tablename__ = "teams_teams"
+
+    id = db.Column(db.Integer, primary_key=True)
+    team_id = db.Column(db.String(512), unique=True, nullable=False, index=True)
+    display_name = db.Column(db.String(512), nullable=True)
+    description = db.Column(db.Text, nullable=True)
+    scraped_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    channels = db.relationship(
+        "TeamsChannel", backref="team", lazy=True, cascade="all, delete-orphan"
+    )
+
+
+class TeamsChannel(db.Model):
+    __tablename__ = "teams_channels"
+
+    id = db.Column(db.Integer, primary_key=True)
+    teams_team_id = db.Column(db.Integer, db.ForeignKey("teams_teams.id"), nullable=False)
+    channel_id = db.Column(db.String(512), unique=True, nullable=False, index=True)
+    display_name = db.Column(db.String(512), nullable=True)
+    description = db.Column(db.Text, nullable=True)
+    scraped_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    posts = db.relationship(
+        "TeamsChannelPost", backref="channel", lazy=True, cascade="all, delete-orphan"
+    )
+
+
+class TeamsChannelPost(db.Model):
+    __tablename__ = "teams_channel_posts"
+
+    id = db.Column(db.Integer, primary_key=True)
+    teams_channel_id = db.Column(db.Integer, db.ForeignKey("teams_channels.id"), nullable=False)
+    message_id = db.Column(db.String(512), unique=True, nullable=False, index=True)
+    sender_name = db.Column(db.String(255), nullable=True)
+    sender_email = db.Column(db.String(255), nullable=True)
+    subject = db.Column(db.String(512), nullable=True)
+    content_html = db.Column(db.Text, nullable=True)
+    content_text = db.Column(db.Text, nullable=True)
+    created_date_time = db.Column(db.DateTime(timezone=True), nullable=True)
+    importance = db.Column(db.String(32), nullable=True)
+    web_url = db.Column(db.Text, nullable=True)
+    message_type = db.Column(db.String(64), nullable=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+
+def upsert_teams_team(team_data):
+    """Create or update a TeamsTeam row from a Graph API joinedTeams item.
+
+    team_data keys: id, displayName (optional), description (optional).
+    Returns the TeamsTeam row.
+    """
+    team_id = team_data.get("id", "")
+    if not team_id:
+        return None
+
+    row = TeamsTeam.query.filter_by(team_id=team_id).first()
+    if not row:
+        row = TeamsTeam(team_id=team_id)
+        db.session.add(row)
+
+    row.display_name = team_data.get("displayName") or team_data.get("display_name")
+    row.description = team_data.get("description")
+
+    db.session.commit()
+    return row
+
+
+def upsert_teams_channel(team_db_id, channel_data):
+    """Create or update a TeamsChannel row.
+
+    channel_data keys: id, displayName (optional), description (optional).
+    Returns the TeamsChannel row.
+    """
+    channel_id = channel_data.get("id", "")
+    if not channel_id:
+        return None
+
+    row = TeamsChannel.query.filter_by(channel_id=channel_id).first()
+    if not row:
+        row = TeamsChannel(channel_id=channel_id, teams_team_id=team_db_id)
+        db.session.add(row)
+
+    row.display_name = channel_data.get("displayName") or channel_data.get("display_name")
+    row.description = channel_data.get("description")
+
+    db.session.commit()
+    return row
+
+
+def save_teams_channel_posts_to_db(channel_db_id, posts_batch):
+    """Insert new Teams channel posts, skipping duplicates and system events.
+
+    Returns {"saved": N, "skipped": M, "rows": [TeamsChannelPost, ...]}.
+    rows contains only the newly saved rows (for immediate ChromaDB embedding).
+    """
+    from datetime import datetime
+
+    saved = 0
+    skipped = 0
+    new_rows = []
+
+    for post in posts_batch:
+        msg_id = post.get("id", "")
+        if not msg_id:
+            skipped += 1
+            continue
+
+        if TeamsChannelPost.query.filter_by(message_id=msg_id).first():
+            skipped += 1
+            continue
+
+        content_html = post.get("contentHtml") or ""
+        content_text = strip_html_tags(content_html) if content_html else ""
+
+        created_str = post.get("createdDateTime", "")
+        created_dt = None
+        if created_str:
+            try:
+                created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+
+        post_row = TeamsChannelPost(
+            teams_channel_id=channel_db_id,
+            message_id=msg_id,
+            sender_name=post.get("senderName") or "",
+            sender_email=post.get("senderEmail") or "",
+            subject=post.get("subject") or "",
+            content_html=content_html,
+            content_text=content_text,
+            created_date_time=created_dt,
+            importance=post.get("importance") or "normal",
+            web_url=post.get("webUrl") or "",
+            message_type=post.get("messageType", "message"),
+        )
+        db.session.add(post_row)
+        new_rows.append(post_row)
+        saved += 1
+
+    db.session.commit()
+    return {"saved": saved, "skipped": skipped, "rows": new_rows}
+
+
+class CalendarEvent(db.Model):
+    __tablename__ = "calendar_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    event_id = db.Column(db.String(512), unique=True, nullable=False, index=True)
+    subject = db.Column(db.Text)
+    organizer_email = db.Column(db.String(255))
+    organizer_name = db.Column(db.String(255))
+    start_datetime = db.Column(db.DateTime(timezone=True))
+    end_datetime = db.Column(db.DateTime(timezone=True))
+    timezone = db.Column(db.String(64))
+    location = db.Column(db.Text)
+    body_html = db.Column(db.Text)
+    body_text = db.Column(db.Text)
+    is_online_meeting = db.Column(db.Boolean, default=False)
+    online_meeting_url = db.Column(db.Text)
+    join_url = db.Column(db.Text)
+    web_link = db.Column(db.Text)
+    searched_email = db.Column(db.String(255), index=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    attendees = db.relationship(
+        "CalendarEventAttendee", backref="event", lazy=True, cascade="all, delete-orphan"
+    )
+
+
+class CalendarEventAttendee(db.Model):
+    __tablename__ = "calendar_event_attendees"
+
+    id = db.Column(db.Integer, primary_key=True)
+    calendar_event_id = db.Column(db.Integer, db.ForeignKey("calendar_events.id"), nullable=False)
+    email = db.Column(db.String(255))
+    name = db.Column(db.String(255))
+    attendee_type = db.Column(db.String(32))    # "required", "optional", "resource"
+    response_status = db.Column(db.String(32))  # "accepted", "declined", "tentativelyAccepted", "none"
+
+
+def save_calendar_event_to_db(event_data, searched_email=None):
+    """Persist one calendar event and its attendees. Returns (saved: bool, skipped: bool).
+
+    Uses the Graph API event id as the deduplication key.
+    """
+    from datetime import datetime
+
+    graph_id = event_data.get("id", "")
+    if not graph_id:
+        return False, False
+
+    existing = CalendarEvent.query.filter_by(event_id=graph_id).first()
+    if existing:
+        if existing.searched_email is None and searched_email:
+            existing.searched_email = searched_email
+            db.session.commit()
+        return False, True
+
+    # Parse start/end datetimes
+    start_info = event_data.get("start") or {}
+    end_info = event_data.get("end") or {}
+    tz = start_info.get("timeZone", "UTC")
+
+    def _parse_dt(dt_str):
+        if not dt_str:
+            return None
+        try:
+            return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    start_dt = _parse_dt(start_info.get("dateTime", ""))
+    end_dt = _parse_dt(end_info.get("dateTime", ""))
+
+    # Location
+    location_info = event_data.get("location") or {}
+    location = location_info.get("displayName", "") or ""
+
+    # Body
+    body_info = event_data.get("body") or {}
+    body_html = body_info.get("content", "")
+    body_content_type = body_info.get("contentType", "html")
+    if body_content_type.lower() == "html":
+        body_text = clean_body_for_export(strip_html_tags(body_html))
+    else:
+        body_text = clean_body_for_export(body_html or "")
+
+    # Organizer
+    org = (event_data.get("organizer") or {}).get("emailAddress") or {}
+    organizer_email = org.get("address", "")
+    organizer_name = org.get("name", "")
+
+    # Online meeting URLs
+    online_meeting_url = event_data.get("onlineMeetingUrl") or ""
+    join_url = (event_data.get("onlineMeeting") or {}).get("joinUrl") or ""
+
+    event_row = CalendarEvent(
+        event_id=graph_id,
+        subject=event_data.get("subject", "(no subject)"),
+        organizer_email=organizer_email,
+        organizer_name=organizer_name,
+        start_datetime=start_dt,
+        end_datetime=end_dt,
+        timezone=tz,
+        location=location,
+        body_html=body_html,
+        body_text=body_text,
+        is_online_meeting=bool(event_data.get("isOnlineMeeting", False)),
+        online_meeting_url=online_meeting_url,
+        join_url=join_url,
+        web_link=event_data.get("webLink", ""),
+        searched_email=searched_email,
+    )
+    db.session.add(event_row)
+    db.session.flush()
+
+    for att in event_data.get("attendees") or []:
+        email_info = (att.get("emailAddress") or {})
+        status_info = (att.get("status") or {})
+        db.session.add(CalendarEventAttendee(
+            calendar_event_id=event_row.id,
+            email=email_info.get("address", ""),
+            name=email_info.get("name", ""),
+            attendee_type=att.get("type", "required"),
+            response_status=status_info.get("response", "none"),
+        ))
+
+    db.session.commit()
+    return True, False
+
 
 def save_email_to_db(message_detail, attachment_list, searched_email=None, project_id=None):
     """Persist one email + its attachments. Returns (saved: bool, skipped: bool).

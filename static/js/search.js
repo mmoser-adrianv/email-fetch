@@ -36,14 +36,20 @@ function renderResults(results) {
     results.forEach(r => {
         const card = document.createElement("div");
         card.className = "result-card";
+        const sourceLabel = r.source_type && r.source_type !== "email"
+            ? `<span class="source-badge">${esc(r.source_type.replace(/_/g, " "))}</span>`
+            : "";
+        const fromLabel = r.source_type === "teams_channel_post"
+            ? `${esc(r.team_name || "")} &rsaquo; ${esc(r.channel_name || "")}`
+            : `From: ${esc(r.sender_name || r.sender_email || "")}${r.sender_name && r.sender_email ? ` &lt;${esc(r.sender_email)}&gt;` : ""}`;
         card.innerHTML = `
             <div class="result-subject">
                 <span class="result-score">${esc(formatScore(r.distance))}</span>
+                ${sourceLabel}
                 ${esc(r.subject || "(no subject)")}
             </div>
             <div class="result-meta">
-                From: ${esc(r.sender_name || r.sender_email || "")}
-                ${r.sender_name && r.sender_email ? `&lt;${esc(r.sender_email)}&gt;` : ""}
+                ${fromLabel}
                 &nbsp;&middot;&nbsp;
                 ${esc(formatDate(r.date_received))}
             </div>

@@ -62,12 +62,52 @@ def embed_and_upsert(email):
         embeddings=[embedding],
         documents=[text[:2000]],
         metadatas=[{
+            "source_type": "email",
             "email_id": email.id,
             "subject": email.subject or "",
             "sender_email": email.sender_email or "",
             "sender_name": email.sender_name or "",
             "date_received": email.date_received.isoformat() if email.date_received else "",
             "recipients": email.recipients or "",
+        }],
+    )
+
+
+def embed_and_upsert_teams_post(post, team_name, channel_name):
+    """Generate an OpenAI embedding for a Teams channel post and upsert it into ChromaDB."""
+    parts = [
+        f"Team: {team_name}",
+        f"Channel: {channel_name}",
+        f"From: {post.sender_name or ''}",
+        f"Date: {post.created_date_time.isoformat() if post.created_date_time else ''}",
+        f"Subject: {post.subject or ''}",
+        "",
+        post.content_text or "",
+    ]
+    text = "\n".join(parts)
+    text = text[:24000]  # ~6,000 tokens, safely under the 8,192 token limit
+
+    response = _get_openai().embeddings.create(
+        input=text,
+        model="text-embedding-3-small",
+    )
+    embedding = response.data[0].embedding
+
+    _get_collection().upsert(
+        ids=[f"tcp_{post.id}"],
+        embeddings=[embedding],
+        documents=[text[:2000]],
+        metadatas=[{
+            "source_type": "teams_channel_post",
+            "email_id": -1,
+            "post_id": post.id,
+            "team_name": team_name,
+            "channel_name": channel_name,
+            "subject": post.subject or channel_name,
+            "sender_name": post.sender_name or "",
+            "sender_email": post.sender_email or "",
+            "date_received": post.created_date_time.isoformat() if post.created_date_time else "",
+            "recipients": "",
         }],
     )
 

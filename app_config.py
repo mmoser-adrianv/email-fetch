@@ -9,7 +9,7 @@ TENANT_ID = os.getenv("TENANT_ID")
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 REDIRECT_PATH = "/getAToken"
-SCOPE = ["User.Read", "People.Read", "Mail.Read", "Mail.Read.Shared", "Group.Read.All", "Chat.Read", "Chat.ReadBasic"]
+SCOPE = ["User.Read", "People.Read", "Mail.Read", "Mail.Read.Shared", "Group.Read.All", "Chat.Read", "Chat.ReadBasic", "Team.ReadBasic.All", "Channel.ReadBasic.All", "ChannelMessage.Read.All"]
 GRAPH_ENDPOINT = "https://graph.microsoft.com/v1.0"
 
 SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
